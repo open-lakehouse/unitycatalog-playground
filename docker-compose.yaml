@@ -1,0 +1,39 @@
+# See https://github.com/unitycatalog/unitycatalog/blob/main/compose.yaml for the full compose file.
+name: unitycatalog
+
+services:
+
+  unitycatalog:
+    image: newfrontdocker/unitycatalog:v0.4.1
+    hostname: unitycatalog
+    container_name: unitycatalog
+    ports:
+      - "8080:8080"
+    volumes:
+      - type: bind
+        source: ./etc/conf/server.properties
+        target: /home/unitycatalog/etc/conf/server.properties
+      - type: bind
+        source: ./uc_data
+        target: /home/unitycatalog/etc/data
+    networks:
+      - unity
+
+  marimo-spark:
+    image: marimo-spark:latest
+    hostname: marimo-spark
+    container_name: marimo-spark
+    environment:
+      - MAVEN_PROXY
+    volumes:
+      - type: bind
+        source: ./marimo-playground/notebooks
+        target: /opt/workspace/marimo-playground/notebooks
+    ports:
+      - "2718:2718"
+    networks:
+      - unity
+
+networks:
+  unity:
+    driver: bridge
