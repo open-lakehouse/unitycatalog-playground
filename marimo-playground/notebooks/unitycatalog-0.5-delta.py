@@ -33,6 +33,7 @@ def _():
 
     import os
     import marimo as mo
+    import getpass
 
     from pyspark.conf import SparkConf
     from pyspark.sql import SparkSession, DataFrame
@@ -42,7 +43,8 @@ def _():
     )
 
     DELTA_VERSION: str = os.environ.get("DELTA_VERSION", "4.2.0").strip()
-    UNITY_CATALOG_VERSION: str=os.environ.get("UNITY_CATALOG_VERSION", "0.4.1").strip()
+    # this is pinned for the demo
+    UNITY_CATALOG_VERSION: str = "0.5.0"
     MAVEN_PROXY: str = os.environ.get("MAVEN_PROXY", "").strip()
     return (
         BooleanType,
@@ -88,9 +90,9 @@ def _(os):
 
 @app.cell
 def _(
-    DELTA_VERSION: str,
-    MAVEN_PROXY: str,
-    UNITY_CATALOG_VERSION: str,
+    DELTA_VERSION,
+    MAVEN_PROXY,
+    UNITY_CATALOG_VERSION,
     catalog,
     os,
     unity_catalog_server_url,
@@ -125,7 +127,7 @@ def _(
 
     config = {
         "spark.jars.packages": f"io.delta:delta-spark_4.1_2.13:{DELTA_VERSION}," +
-        f"io.unitycatalog:unitycatalog-spark_2.13:{UNITY_CATALOG_VERSION},org.apache.hadoop:hadoop-aws:3.4.2," +
+        f"io.unitycatalog:unitycatalog-spark_4.1_2.13:{UNITY_CATALOG_VERSION},org.apache.hadoop:hadoop-aws:3.4.2," +
         f"software.amazon.awssdk:bundle:2.29.52",
         "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
         "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
@@ -449,7 +451,7 @@ def _(pets, pets_to_dataframe, spark: "SparkSession", uc_schema, uc_table):
 
 @app.cell
 def _(spark: "SparkSession"):
-    spark.sql("select count(*) as total from dais.pets").show()
+    spark.sql("select count(*) as total from sanctuary.pets").show()
     return
 
 
@@ -590,6 +592,18 @@ def _(mo, spark: "SparkSession"):
     return (dt,)
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Limitations
+    At this point in time there are some limitations when using Catalog Managed Tables given this feature is still experimental.
+
+    1. `DeltaTableBuilder` will fail to generate a new Catalog Managed Table. This is a known limitation and we're working on support.
+    2. Vacuum Support - `DeltaTable.forName(spark, "unity.sanctuary.pets").vacuum()` will fail with `UnsupportedOperationException` **[DELTA_UNSUPPORTED_VACUUM_ON_MANAGED_TABLE]**.
+    """)
+    return
+
+
 @app.cell
 def _(dt):
     # this will fail at this point in time (Delta 4.1 with Unity Catalog 0.4.0)
@@ -614,14 +628,22 @@ def _(mo):
 @app.cell(disabled=True)
 def _(spark: "SparkSession"):
     spark.sql(f"""
-    DROP TABLE unity.dais.pets
+    DROP TABLE unity.sanctuary.pets
     """)
     return
 
 
 @app.cell(disabled=True)
 def _(spark: "SparkSession"):
-    spark.sql("DROP SCHEMA unity.dais")
+    spark.sql("DROP SCHEMA unity.sanctuary")
+    return
+
+
+@app.cell(disabled=True)
+def _():
+    import subprocess
+    result = subprocess.run(["java", "-version"], capture_output=True, text=True)
+    print(result.stderr)
     return
 
 

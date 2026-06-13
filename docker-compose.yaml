@@ -1,9 +1,14 @@
-# See https://github.com/unitycatalog/unitycatalog/blob/main/compose.yaml for the full compose file.
-name: unitycatalog
+name: unitycatalog-playground
 
 services:
-
+  # Bundled local Unity Catalog server. Gated behind the `local-uc` profile so a
+  # plain `docker compose up` runs ONLY marimo-spark (talking to a remote/managed
+  # UC). Start this too with:  docker compose --profile local-uc up
+  # (or via the Justfile:  just uc=local up).
+  # See https://github.com/unitycatalog/unitycatalog/blob/main/compose.yaml.
   unitycatalog:
+    profiles:
+      - local-uc
     image: newfrontdocker/unitycatalog:v0.4.1
     hostname: unitycatalog
     container_name: unitycatalog
@@ -21,19 +26,67 @@ services:
 
   marimo-spark:
     image: marimo-spark:latest
+    build:
+      context: .
+      args:
+        # Optional PyPI proxy for internal/corporate builds (e.g. Databricks).
+        # Sourced from .env (see .env.example); blank -> default public PyPI.
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     hostname: marimo-spark
     container_name: marimo-spark
+    # Lets the container reach services published on the host (e.g. a Unity
+    # Catalog server running in a separate compose project).
+    # Required on Linux/colima; harmless on Docker Desktop where it already resolves.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - MAVEN_PROXY
+      # Point Spark at the mounted host Ivy repo (see the ivy2 bind mount below)
+      # so it can resolve locally published SNAPSHOTs such as unitycatalog-spark.
+      # Spark's local-ivy-cache resolver searches `${spark.jars.ivy}/local`.
+      - SPARK_JARS_IVY=/opt/ivy2
+      # URL the notebook uses to reach Unity Catalog. Defaults to the bundled
+      # `unitycatalog` service (reachable over the `unity` bridge by hostname).
+      # For a remote/managed UC, override UC_SERVER_URL / UC_SERVER_PORT in .env.
+      # notice that there is no port number in the URL, this is intentional
+      - UC_SERVER_URL=${UC_SERVER_URL:-http://unitycatalog}
+      - UC_SERVER_PORT=${UC_SERVER_PORT:-8080}
+      # Bearer token for an auth-enabled Unity Catalog server (see .env.example).
+      # Blank for the local quickstart server, which runs without auth.
+      - UC_TOKEN=${UC_TOKEN:-}
     volumes:
       - type: bind
         source: ./marimo-playground/notebooks
         target: /opt/workspace/marimo-playground/notebooks
+      # Mount the host's local Ivy repository so Spark can resolve jars you
+      # published with `bin/sbt publishLocal` (these live in ~/.ivy2/local on the
+      # host). Mounted read-write so Spark can also update its resolution cache.
+      # Override the host path by setting HOST_IVY_DIR in .env (see .env.example).
+      - type: bind
+        source: ${HOST_IVY_DIR:-${HOME}/.ivy2}
+        target: /opt/ivy2
+      # Host ./spark mounted at /spark, providing:
+      #   - /spark/jars: pre-downloaded jars (delta / unitycatalog / hadoop-aws,
+      #     etc). Populate with `just jars` to speed up notebook startup. The
+      #     actual jars are git-ignored; the dir is kept via spark/jars/.gitkeep.
+      #   - /spark/ivysettings.xml: proxy-only Ivy resolver template used by
+      #     `just jars` so resolution skips the firewalled Maven Central /
+      #     spark-packages defaults and goes straight to MAVEN_PROXY.
+      - type: bind
+        source: ./spark
+        target: /spark
     ports:
       - "2718:2718"
     networks:
       - unity
+      # Shared external network so marimo-spark can also reach a UC server that
+      # lives in a *separate* compose project (which joins the same network).
+      # The network must exist first — create it idempotently with `just net`
+      # (the up/jars recipes do this automatically): docker network create uc-shared
+      - uc-shared
 
 networks:
   unity:
     driver: bridge
+  uc-shared:
+    external: true

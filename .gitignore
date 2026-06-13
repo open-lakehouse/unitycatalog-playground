@@ -216,4 +216,8 @@ derby.log
 *.checkpoint
 spark-warehouse/
 
+# Pre-downloaded Spark jars (populated by `just jars`); keep the dir via .gitkeep
+spark/jars/*
+!spark/jars/.gitkeep
+
 .DS_Store

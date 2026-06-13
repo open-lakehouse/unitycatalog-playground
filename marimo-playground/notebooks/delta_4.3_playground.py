@@ -7,7 +7,14 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Delta 4.2: Unity Catalog Managed Tables Enhancements
+    # Delta 4.3: Playground
+
+    A scratch notebook for experimenting with Delta + Unity Catalog. Unlike the
+    `delta_4.2_enhancements` notebook (which resolves jars from Maven via
+    `spark.jars.packages`), this one prefers the **pre-downloaded jars** in
+    `/spark/jars` (populate them on the host with `just jars`). When that
+    directory is empty — e.g. a local `uv` run — it transparently falls back to
+    Maven resolution.
     """)
     return
 
@@ -17,6 +24,7 @@ def _():
     from pathlib import Path
 
     import os
+    import glob
     import marimo as mo
     import getpass
 
@@ -32,12 +40,23 @@ def _():
     UNITY_CATALOG_VERSION='0.4.1'
     HADOOP_VERSION='3.4.2'
     MAVEN_PROXY = os.environ.get("MAVEN_PROXY", "").strip()
+
+    # Directory of pre-downloaded jars (bind-mounted to /spark/jars in the
+    # container; populate it on the host with `just jars`). Override with
+    # SPARK_JARS_DIR. LOCAL_JARS is the resolved list — empty when nothing has
+    # been pre-downloaded, in which case the config cell falls back to Maven.
+    SPARK_JARS_DIR = os.environ.get("SPARK_JARS_DIR", "/spark/jars")
+    LOCAL_JARS = sorted(glob.glob(os.path.join(SPARK_JARS_DIR, "*.jar")))
     return (
         BooleanType,
         DELTA_VERSION,
         DataFrame,
+        HADOOP_VERSION,
         IntegerType,
+        LOCAL_JARS,
         MAVEN_PROXY,
+        SPARK_JARS_DIR,
+        SPARK_VERSION,
         SparkConf,
         SparkSession,
         StringType,
@@ -71,79 +90,103 @@ def _(os):
 
 
 @app.cell
-def _(unity_catalog_server_url):
-    print(unity_catalog_server_url)
+def _(LOCAL_JARS, SPARK_JARS_DIR, unity_catalog_server_url):
+    print(f"Unity Catalog: {unity_catalog_server_url}")
+    if LOCAL_JARS:
+        print(f"Jar source: local ({len(LOCAL_JARS)} jars from {SPARK_JARS_DIR})")
+    else:
+        print(f"Jar source: Maven (no jars found in {SPARK_JARS_DIR} — run `just jars`)")
     return
+
+
+@app.function
+def render_ivy_settings(proxy: str, ivy_dir: str | None) -> str | None:
+    """Render spark/ivysettings.xml (proxy-first + local chain) to a temp file.
+
+    Returns the rendered file path, or None if the template can't be found
+    (so the caller can fall back to `spark.jars.repositories`).
+    """
+    import tempfile
+    from pathlib import Path as _Path
+
+    local_root = f"{ivy_dir or _Path.home() / '.ivy2'}/local"
+    candidates = [_Path("/spark/ivysettings.xml")]
+    try:  # repo-relative path for local (uv) runs
+        candidates.append(_Path(__file__).resolve().parents[2] / "spark" / "ivysettings.xml")
+    except NameError:
+        pass
+    template = next((p for p in candidates if p.exists()), None)
+    if template is None:
+        return None
+    rendered = (
+        template.read_text()
+        .replace("@MAVEN_PROXY@", proxy)
+        .replace("@IVY_LOCAL_ROOT@", local_root)
+    )
+    out = _Path(tempfile.gettempdir()) / "ivysettings-rendered.xml"
+    out.write_text(rendered)
+    return str(out)
 
 
 @app.cell
 def _(
     DELTA_VERSION,
+    HADOOP_VERSION,
+    LOCAL_JARS,
     MAVEN_PROXY,
+    SPARK_VERSION,
     UNITY_CATALOG_VERSION,
     catalog,
     os,
     unity_catalog_server_url,
     unity_catalog_token,
 ):
-    def _render_ivy_settings(proxy: str, ivy_dir: str | None) -> str | None:
-        """Render spark/ivysettings.xml (proxy-first + local chain) to a temp file.
-
-        Returns the rendered file path, or None if the template can't be found
-        (so the caller can fall back to `spark.jars.repositories`).
-        """
-        import tempfile
-        from pathlib import Path as _Path
-
-        local_root = f"{ivy_dir or _Path.home() / '.ivy2'}/local"
-        candidates = [_Path("/spark/ivysettings.xml")]
-        try:  # repo-relative path for local (uv) runs
-            candidates.append(_Path(__file__).resolve().parents[2] / "spark" / "ivysettings.xml")
-        except NameError:
-            pass
-        template = next((p for p in candidates if p.exists()), None)
-        if template is None:
-            return None
-        rendered = (
-            template.read_text()
-            .replace("@MAVEN_PROXY@", proxy)
-            .replace("@IVY_LOCAL_ROOT@", local_root)
-        )
-        out = _Path(tempfile.gettempdir()) / "ivysettings-rendered.xml"
-        out.write_text(rendered)
-        return str(out)
-
+    # Catalog/extension wiring is the same regardless of how the jars are sourced.
     config = {
         "spark.jars.packages": f"io.delta:delta-spark_4.1_2.13:{DELTA_VERSION}," +
-        f"io.unitycatalog:unitycatalog-spark_2.13:{UNITY_CATALOG_VERSION},org.apache.hadoop:hadoop-aws:3.4.2," +
-        f"software.amazon.awssdk:bundle:2.29.52",
+        f"io.unitycatalog:unitycatalog-spark_2.13:{UNITY_CATALOG_VERSION},org.apache.hadoop:hadoop-aws:{HADOOP_VERSION}",
         "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
         "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         f"spark.sql.catalog.{catalog}": "io.unitycatalog.spark.UCSingleCatalog",
         f"spark.sql.catalog.{catalog}.uri": unity_catalog_server_url,
         f"spark.sql.catalog.{catalog}.token": unity_catalog_token,
         "spark.sql.defaultCatalog": catalog,
-        "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
-        "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
     }
 
-    # Inside docker the host Ivy repo is bind-mounted and SPARK_JARS_IVY=/opt/ivy2;
-    # locally (uv) it's unset, so Spark uses the default ~/.ivy2 on your laptop.
-    ivy_dir = os.environ.get("SPARK_JARS_IVY")
-    if ivy_dir:
-        config["spark.jars.ivy"] = ivy_dir
-
-    if MAVEN_PROXY:
-        # Proxy-first Ivy resolver (spark/ivysettings.xml) instead of appending
-        # via `spark.jars.repositories` — avoids probing the unreachable
-        # repo1.maven.org / spark-packages first. Falls back to the old append
-        # behaviour if the template can't be located.
-        rendered = _render_ivy_settings(MAVEN_PROXY, ivy_dir)
-        if rendered:
-            config["spark.jars.ivySettings"] = rendered
-        else:
-            config["spark.jars.repositories"] = MAVEN_PROXY
+    if LOCAL_JARS:
+        # Use the pre-downloaded jars from `just jars`. Spark adds these straight
+        # to the classpath, skipping Ivy/Maven resolution at session startup.
+        config["spark.jars"] = ",".join(LOCAL_JARS)
+    else:
+        # Nothing pre-downloaded — resolve the coordinates from Maven (Ivy),
+        # routing through MAVEN_PROXY when one is configured.
+        config["spark.jars.packages"] = (
+            f"io.delta:delta-spark_{SPARK_VERSION}_2.13:{DELTA_VERSION},"
+            f"io.unitycatalog:unitycatalog-spark_2.13:{UNITY_CATALOG_VERSION},"
+            f"org.apache.hadoop:hadoop-aws:{HADOOP_VERSION}"
+        )
+        # Inside docker the host Ivy repo is bind-mounted and
+        # SPARK_JARS_IVY=/opt/ivy2; locally (uv) it's unset (default ~/.ivy2).
+        ivy_dir = os.environ.get("SPARK_JARS_IVY")
+        if ivy_dir:
+            config["spark.jars.ivy"] = ivy_dir
+        if MAVEN_PROXY:
+            # Proxy-first Ivy resolver (spark/ivysettings.xml) instead of
+            # appending via `spark.jars.repositories`, which probes the
+            # unreachable repo1.maven.org / spark-packages first. Falls back to
+            # the old append behaviour if the template can't be located.
+            rendered = render_ivy_settings(MAVEN_PROXY, ivy_dir)
+            if rendered:
+                config["spark.jars.ivySettings"] = rendered
+            else:
+                config["spark.jars.repositories"] = MAVEN_PROXY
     return (config,)
+
+
+@app.cell
+def _(config):
+    config
+    return
 
 
 @app.cell
@@ -171,6 +214,12 @@ def _(mo):
     2. Once we have our `unity.sanctuary` location created, we can start to work with our Pet data.
     3. Then once we have written into the `pets` table, we can create another table to use as our **replacement**.
     """)
+    return
+
+
+@app.cell
+def _(spark: "SparkSession"):
+    spark.catalog.listCatalogs()
     return
 
 
