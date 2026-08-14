@@ -206,10 +206,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Unity Catalog (Docker bind mount; directory kept via uc_data/.gitkeep)
-uc_data/*
-!uc_data/.gitkeep
-
 # Spark Stuff
 metastore_db/
 derby.log
@@ -219,5 +215,9 @@ spark-warehouse/
 # Pre-downloaded Spark jars (populated by `just jars`); keep the dir via .gitkeep
 spark/jars/*
 !spark/jars/.gitkeep
+
+# Local delta-spark override wheel for pre-release testing (kept via .gitkeep)
+spark/delta-override/*
+!spark/delta-override/.gitkeep
 
 .DS_Store

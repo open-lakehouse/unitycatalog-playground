@@ -21,6 +21,14 @@ compose_profile := if uc == "local" { "--profile local-uc" } else if uc == "remo
 # Base docker compose invocation used by every recipe below.
 compose := "docker compose " + compose_profile
 
+# When targeting the bundled local UC, managed tables live in the in-network
+# RustFS S3 object store; point the notebooks' Spark S3A client at it. Empty for
+# remote UC (real S3 / AWS default endpoint), so `just up` is unaffected. `up`,
+# `up-detached`, and `rotate-creds` export this so it reaches the marimo-spark
+# container (a shell env var overrides any blank S3_ENDPOINT_URL in .env).
+s3_endpoint_url := if uc == "local" { "http://rustfs:9000" } else { "" }
+s3_endpoint_env := if s3_endpoint_url != "" { "S3_ENDPOINT_URL=" + s3_endpoint_url } else { "" }
+
 # External docker network marimo-spark joins so it can also reach a UC server
 # running in a separate compose project. `just net` creates it idempotently.
 shared_network := "uc-shared"
@@ -30,8 +38,8 @@ image := "marimo-spark"
 tag   := "latest"
 
 # Optional pip proxy used at image build time (corporate mirrors, etc).
-# Override per-invocation, e.g. `just pip_index_url=https://pypi.acme.com/simple build`.
-pip_index_url := "https://pypi-proxy.cloud.databricks.com/simple"
+# Override per-invocation, e.g. `just pypi_proxy_url=https://pypi.acme.com/simple build`.
+pypi_proxy_url := "https://pypi-proxy.cloud.databricks.com/simple"
 
 # The compose service that hosts the marimo notebook UI.
 marimo_service := "marimo-spark"
@@ -49,7 +57,7 @@ jars_dir := "spark/jars"
 # notebook references it (no Spark 4.1 runtime is published yet).
 
 # uncomment this to copy the public uc jars
-jars_packages := "io.delta:delta-spark_4.1_2.13:4.2.0,io.unitycatalog:unitycatalog-spark_2.13:0.4.1,org.apache.hadoop:hadoop-aws:3.4.2,software.amazon.awssdk:bundle:2.29.52"
+jars_packages := "io.delta:delta-spark_4.2_2.13:4.4.0-SNAPSHOT,io.unitycatalog:unitycatalog-spark_4.2_2.13:0.6.0,org.apache.hadoop:hadoop-aws:3.4.2,software.amazon.awssdk:bundle:2.29.52"
 # ---- Meta -------------------------------------------------------------------
 
 # Show all available recipes (default when running bare `just`).
@@ -68,30 +76,54 @@ start: build up-detached url
 
 # ---- Environment file -------------------------------------------------------
 
-# .env supplies the optional PIP_INDEX_URL / MAVEN_PROXY proxies used internally.
+# .env supplies the optional PYPI_PROXY_URL / MAVEN_PROXY_URL proxies used internally.
 # Create .env from .env.example if it doesn't already exist (idempotent).
 init:
-    @test -f .env && echo ".env already exists — leaving it untouched (edit it to set PIP_INDEX_URL / MAVEN_PROXY)." || { cp .env.example .env && echo "Created .env from .env.example — set PIP_INDEX_URL / MAVEN_PROXY if building internally (e.g. Databricks)."; }
+    @test -f .env && echo ".env already exists — leaving it untouched (edit it to set PYPI_PROXY_URL / MAVEN_PROXY_URL)." || { cp .env.example .env && echo "Created .env from .env.example — set PYPI_PROXY_URL / MAVEN_PROXY_URL if building internally (e.g. Databricks)."; }
 
 # ---- Docker image -----------------------------------------------------------
 
-# Override the proxy ad-hoc with: just --set pip_index_url https://.../simple build
-# Build the marimo-spark image via compose (auto-loads .env for PIP_INDEX_URL).
+# Override the proxy ad-hoc with: just --set pypi_proxy_url https://.../simple build
+# Build the marimo-spark image via compose (auto-loads .env for PYPI_PROXY_URL).
 build: init
-    {{ if pip_index_url != "" { "PIP_INDEX_URL=" + pip_index_url } else { "" } }} {{compose}} build
+    {{ if pypi_proxy_url != "" { "PYPI_PROXY_URL=" + pypi_proxy_url } else { "" } }} {{compose}} build
 
 # Force a clean rebuild with no layer cache.
 rebuild: init
-    {{ if pip_index_url != "" { "PIP_INDEX_URL=" + pip_index_url } else { "" } }} {{compose}} build --no-cache
+    {{ if pypi_proxy_url != "" { "PYPI_PROXY_URL=" + pypi_proxy_url } else { "" } }} {{compose}} build --no-cache
+
+# Stage a locally-built delta-spark wheel for a pre-release override build. The
+# wheel is copied into spark/delta-override/ (git-ignored); set the printed
+# DELTA_SPARK_WHEEL value in .env, then `just rebuild` to bake it into the image.
+# Usage: just stage-delta ~/Desktop/delta-4.4.0/python/delta_spark-4.4.0-py3-none-any.whl
+stage-delta wheel:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f "{{wheel}}" ]; then
+        echo "No such wheel: {{wheel}}" >&2
+        exit 1
+    fi
+    mkdir -p spark/delta-override
+    cp -v "{{wheel}}" spark/delta-override/
+    name="$(basename "{{wheel}}")"
+    echo ""
+    echo "Staged spark/delta-override/${name}"
+    echo "Now set in .env:  DELTA_SPARK_WHEEL=${name}"
+    echo "Then rebuild:     just rebuild"
 
 # ---- Spark jars -------------------------------------------------------------
 
 # Resolution runs inside the marimo-spark image via spark-submit (Ivy). When
-# MAVEN_PROXY is set (from .env) it renders spark/ivysettings.xml into a
-# proxy-only resolver, so Ivy skips the firewalled repo1.maven.org /
-# spark-packages defaults and pulls everything from the proxy. ./spark is
-# bind-mounted to /spark (see docker-compose.yaml). Re-runnable: existing jars
-# are not re-copied, and it requires the image — run `just build` first if needed.
+# MAVEN_PROXY_URL is set (from .env) it renders spark/ivysettings.xml into a
+# proxy-first resolver, so Ivy skips the firewalled repo1.maven.org /
+# spark-packages defaults and pulls releases from the proxy; artifacts the proxy
+# lacks (e.g. locally `sbt publishLocal`-ed delta-spark / unitycatalog-spark
+# builds) fall through to the mounted host Ivy repo at /opt/ivy2/local — the same
+# repo the notebooks resolve from (SPARK_JARS_IVY=/opt/ivy2). Downloaded jars are
+# still staged under /tmp/ivy so only THIS run's set is copied to ./spark/jars.
+# ./spark is bind-mounted to /spark (see docker-compose.yaml). Re-runnable:
+# existing jars are not re-copied, and it requires the image — run `just build`
+# first if needed.
 # Pre-download notebook jars (+ transitive deps) into ./spark/jars for fast startup.
 jars: init net
     #!/usr/bin/env bash
@@ -100,12 +132,12 @@ jars: init net
     {{compose}} run --rm --no-deps -T --entrypoint bash {{marimo_service}} -lc '
         set -euo pipefail
         ivy_args="--conf spark.jars.ivy=/tmp/ivy"
-        if [ -n "${MAVEN_PROXY:-}" ]; then
-            sed -e "s#@MAVEN_PROXY@#${MAVEN_PROXY}#g" \
-                -e "s#@IVY_LOCAL_ROOT@#/tmp/ivy/local#g" \
+        if [ -n "${MAVEN_PROXY_URL:-}" ]; then
+            sed -e "s#@MAVEN_PROXY_URL@#${MAVEN_PROXY_URL}#g" \
+                -e "s#@IVY_LOCAL_ROOT@#/opt/ivy2/local#g" \
                 /spark/ivysettings.xml > /tmp/ivysettings.xml
             ivy_args="$ivy_args --conf spark.jars.ivySettings=/tmp/ivysettings.xml"
-            echo "Using proxy-first Ivy resolver: ${MAVEN_PROXY}"
+            echo "Using proxy-first Ivy resolver: ${MAVEN_PROXY_URL}"
         fi
         printf "pass\n" > /tmp/noop.py
         "$SPARK_HOME"/bin/spark-submit \
@@ -131,11 +163,11 @@ net:
 
 # Start the environment in the foreground (add `uc=local` for the bundled UC).
 up: init net
-    {{compose}} up
+    {{s3_endpoint_env}} {{compose}} up
 
 # Start the environment in the background (detached).
 up-detached: init net
-    {{compose}} up -d
+    {{s3_endpoint_env}} {{compose}} up -d
 
 # Show running compose services.
 ps:
@@ -171,23 +203,47 @@ url:
     done
     echo "No marimo URL found yet — the container may still be starting. Try: just url   (or: just logs-marimo)"
 
+# Log in to the console with RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY
+# (defaults: rustfsadmin / rustfsadmin).
+# Print the RustFS console + S3 API URLs (uc=local).
+rustfs-url:
+    @echo "RustFS console: http://localhost:${RUSTFS_CONSOLE_PORT:-9001}"
+    @echo "RustFS S3 API:  http://localhost:${RUSTFS_API_PORT:-9000}"
+
+# Use when managed-table reads/writes start failing with expired- or invalid-
+# credential errors. uc=local only; the STS lifetime defaults to 12h
+# (STS_DURATION_SECONDS in .env). The bucket + its data are left untouched.
+# Re-mint the RustFS STS credential UC vends to Spark, then restart UC to load it.
+rotate-creds:
+    {{s3_endpoint_env}} {{compose}} up -d --force-recreate --no-deps rustfs-init
+    {{compose}} restart unitycatalog
+
 # Restart the environment (down + up detached).
 restart: down up-detached
 
 # ---- Teardown ---------------------------------------------------------------
 
-# Stop and remove this project's containers, networks, and persistent volumes.
+# Stop and remove this project's containers and networks.
+# Named volumes are kept, so a subsequent `just uc=local up` / `just restart`
+# restores the same catalog metadata (`uc_postgres_data`) and managed table data
+# (`rustfs_data`). The `uc_conf` volume is regenerated on the next `up`.
 # Note: no --remove-orphans — it would delete containers on this project's
 # network that aren't in this compose file (e.g. a UC server from another
 # project). Run `docker compose down --remove-orphans` by hand if you want that.
 down:
-    {{compose}} down --volumes
+    {{compose}} down
 
 # Tear down the environment (counterpart to `just start`).
 alias stop := down
 
-# Same as `down` but also removes the locally built image.
-clean: down
+# Wipes local UC Postgres metadata (`uc_postgres_data`) AND all RustFS
+# managed-table data (`rustfs_data`).
+# Like `down`, but also deletes named volumes.
+down-volumes:
+    {{compose}} down --volumes
+
+# Wipe volumes and remove the locally built marimo-spark image.
+clean: down-volumes
     -docker image rm {{image}}:{{tag}}
 
 # ---- Local notebook workflow (uv, no docker) --------------------------------

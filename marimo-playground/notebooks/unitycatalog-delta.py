@@ -40,16 +40,21 @@ def _():
         StructType, StructField, 
         StringType, IntegerType, BooleanType
     )
-
-    DELTA_VERSION: str = os.environ.get("DELTA_VERSION", "4.2.0").strip()
-    UNITY_CATALOG_VERSION: str=os.environ.get("UNITY_CATALOG_VERSION", "0.4.1").strip()
-    MAVEN_PROXY: str = os.environ.get("MAVEN_PROXY", "").strip()
+    
+    DELTA_VERSION: str = os.environ.get("DELTA_VERSION", "4.4.0-SNAPSHOT").strip()
+    HADOOP_VERSION: str = os.environ.get("HADOOP_VERSION", "3.4.2").strip()
+    MAVEN_PROXY_URL: str = os.environ.get("MAVEN_PROXY_URL", "").strip()
+    SPARK_VERSION='4.2'
+    UNITY_CATALOG_VERSION: str=os.environ.get("UNITY_CATALOG_VERSION", "0.6.0").strip()
+    
     return (
         BooleanType,
         DELTA_VERSION,
         DataFrame,
         IntegerType,
-        MAVEN_PROXY,
+        HADOOP_VERSION,
+        MAVEN_PROXY_URL,
+        SPARK_VERSION,
         SparkConf,
         SparkSession,
         StringType,
@@ -89,7 +94,9 @@ def _(os):
 @app.cell
 def _(
     DELTA_VERSION: str,
-    MAVEN_PROXY: str,
+    HADOOP_VERSION: str,
+    MAVEN_PROXY_URL: str,
+    SPARK_VERSION: str,
     UNITY_CATALOG_VERSION: str,
     catalog,
     os,
@@ -116,7 +123,7 @@ def _(
             return None
         rendered = (
             template.read_text()
-            .replace("@MAVEN_PROXY@", proxy)
+            .replace("@MAVEN_PROXY_URL@", proxy)
             .replace("@IVY_LOCAL_ROOT@", local_root)
         )
         out = _Path(tempfile.gettempdir()) / "ivysettings-rendered.xml"
@@ -124,8 +131,8 @@ def _(
         return str(out)
 
     config = {
-        "spark.jars.packages": f"io.delta:delta-spark_4.1_2.13:{DELTA_VERSION}," +
-        f"io.unitycatalog:unitycatalog-spark_2.13:{UNITY_CATALOG_VERSION},org.apache.hadoop:hadoop-aws:3.4.2," +
+        "spark.jars.packages": f"io.delta:delta-spark_{SPARK_VERSION}_2.13:{DELTA_VERSION}," +
+        f"io.unitycatalog:unitycatalog-spark_{SPARK_VERSION}_2.13:{UNITY_CATALOG_VERSION},org.apache.hadoop:hadoop-aws:{HADOOP_VERSION}," +
         f"software.amazon.awssdk:bundle:2.29.52",
         "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
         "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
@@ -137,6 +144,19 @@ def _(
         "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
     }
 
+    # When the local stack backs Unity Catalog with the bundled RustFS object
+    # store, managed tables live on s3://…. UC vends the S3 credentials at query
+    # time, but the endpoint / path-style / plaintext-HTTP switches are
+    # client-side, so set them here from S3_ENDPOINT_URL. Leave it empty for AWS
+    # S3 or a remote UC on real S3 (this block is then skipped); `just uc=local`
+    # sets it to the in-network RustFS service automatically.
+    s3_endpoint = os.environ.get("S3_ENDPOINT_URL", "").strip()
+    if s3_endpoint:
+        config["spark.hadoop.fs.s3a.endpoint"] = s3_endpoint
+        config["spark.hadoop.fs.s3a.endpoint.region"] = os.environ.get("S3_REGION", "us-east-1").strip() or "us-east-1"
+        config["spark.hadoop.fs.s3a.path.style.access"] = "true"
+        config["spark.hadoop.fs.s3a.connection.ssl.enabled"] = "false"
+
     # When running inside the docker container, the host's local Ivy repository is
     # bind-mounted (see docker-compose.yaml) and SPARK_JARS_IVY is set to /opt/ivy2.
     # Pointing Spark at it makes any locally published unitycatalog-spark SNAPSHOT
@@ -146,7 +166,7 @@ def _(
     if ivy_dir:
         config["spark.jars.ivy"] = ivy_dir
 
-    if MAVEN_PROXY:
+    if MAVEN_PROXY_URL:
         # Behind the firewall, resolve everything through a proxy-first Ivy
         # resolver (spark/ivysettings.xml) instead of Spark's default
         # `spark.jars.repositories`, which only APPENDS the proxy and so probes
@@ -154,11 +174,11 @@ def _(
         # refused" noise) and can let a locally published delta-spark shadow the
         # release. _render_ivy_settings renders the template; on miss it falls
         # back to the old append behaviour so resolution still works.
-        rendered = _render_ivy_settings(MAVEN_PROXY, ivy_dir)
+        rendered = _render_ivy_settings(MAVEN_PROXY_URL, ivy_dir)
         if rendered:
             config["spark.jars.ivySettings"] = rendered
         else:
-            config["spark.jars.repositories"] = MAVEN_PROXY
+            config["spark.jars.repositories"] = MAVEN_PROXY_URL
     return (config,)
 
 

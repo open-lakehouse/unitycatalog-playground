@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Ivy settings template used whenever a MAVEN_PROXY is configured — by both
+  Ivy settings template used whenever a MAVEN_PROXY_URL is configured — by both
   `just jars` (spark-submit pre-download) and the marimo notebooks (which point
   `spark.jars.ivySettings` at a rendered copy of this file).
 
@@ -32,7 +32,7 @@
 
   Placeholders (substituted at render time)
   =========================================
-    @MAVEN_PROXY@      -> the MAVEN_PROXY value (Maven2 root URL).
+    @MAVEN_PROXY_URL@      -> the MAVEN_PROXY_URL value (Maven2 root URL).
     @IVY_LOCAL_ROOT@   -> absolute path to the local Ivy repo's `local` dir
                           (e.g. /opt/ivy2/local in the container, /tmp/ivy/local
                           for `just jars`). Passed explicitly rather than relying
@@ -44,7 +44,7 @@
   <resolvers>
     <chain name="main-chain" returnFirst="true">
       <!-- Proxy FIRST: releases resolve here, so local builds never shadow them. -->
-      <ibiblio name="databricks-proxy" m2compatible="true" root="@MAVEN_PROXY@"/>
+      <ibiblio name="databricks-proxy" m2compatible="true" root="@MAVEN_PROXY_URL@"/>
       <!-- Local Ivy repo SECOND: only for coordinates the proxy lacks (SNAPSHOTs). -->
       <filesystem name="local-ivy" checkmodified="true" changingPattern=".*-SNAPSHOT">
         <ivy pattern="@IVY_LOCAL_ROOT@/[organisation]/[module]/[revision]/ivys/ivy.xml"/>
