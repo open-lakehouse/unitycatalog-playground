@@ -169,8 +169,12 @@ services:
       # URL the notebook uses to reach Unity Catalog. Defaults to the bundled
       # `unitycatalog` service (reachable over the `unity` bridge by hostname).
       # For a remote/managed UC, override UC_SERVER_URL / UC_SERVER_PORT in .env.
-      # notice that there is no port number in the URL, this is intentional
-      - UC_SERVER_URL=${UC_SERVER_URL:-http://unitycatalog}
+      # Keep this a BARE host (no scheme): the notebook combines it with
+      # UC_SERVER_PORT into http://<host>:<port>. A scheme-qualified value
+      # (http://unitycatalog) is used verbatim and drops the port -> connects to
+      # port 80 -> java.net.ConnectException. Use a full URL only when it already
+      # includes the port (or a remote UC on 443).
+      - UC_SERVER_URL=${UC_SERVER_URL:-unitycatalog}
       - UC_SERVER_PORT=${UC_SERVER_PORT:-8080}
       # Bearer token for an auth-enabled Unity Catalog server (see .env.example).
       # Blank for the local quickstart server, which runs without auth.

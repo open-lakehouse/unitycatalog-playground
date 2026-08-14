@@ -39,7 +39,7 @@ tag   := "latest"
 
 # Optional pip proxy used at image build time (corporate mirrors, etc).
 # Override per-invocation, e.g. `just pypi_proxy_url=https://pypi.acme.com/simple build`.
-pypi_proxy_url := "https://pypi-proxy.cloud.databricks.com/simple"
+pypi_proxy_url := ""
 
 # The compose service that hosts the marimo notebook UI.
 marimo_service := "marimo-spark"

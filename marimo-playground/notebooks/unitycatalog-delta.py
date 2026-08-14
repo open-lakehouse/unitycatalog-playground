@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.9"
+__generated_with = "0.23.16"
 app = marimo.App(width="medium")
 
 
@@ -40,19 +40,18 @@ def _():
         StructType, StructField, 
         StringType, IntegerType, BooleanType
     )
-    
-    DELTA_VERSION: str = os.environ.get("DELTA_VERSION", "4.4.0-SNAPSHOT").strip()
+
+    DELTA_VERSION: str = os.environ.get("DELTA_VERSION", "4.4.0-rc1-SNAPSHOT").strip()
     HADOOP_VERSION: str = os.environ.get("HADOOP_VERSION", "3.4.2").strip()
     MAVEN_PROXY_URL: str = os.environ.get("MAVEN_PROXY_URL", "").strip()
     SPARK_VERSION='4.2'
-    UNITY_CATALOG_VERSION: str=os.environ.get("UNITY_CATALOG_VERSION", "0.6.0").strip()
-    
+    UNITY_CATALOG_VERSION: str=os.environ.get("UNITY_CATALOG_VERSION", "0.6.0-rc1-SNAPSHOT").strip()
     return (
         BooleanType,
         DELTA_VERSION,
         DataFrame,
-        IntegerType,
         HADOOP_VERSION,
+        IntegerType,
         MAVEN_PROXY_URL,
         SPARK_VERSION,
         SparkConf,
@@ -91,12 +90,12 @@ def _(os):
     return catalog, unity_catalog_server_url, unity_catalog_token
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     DELTA_VERSION: str,
     HADOOP_VERSION: str,
     MAVEN_PROXY_URL: str,
-    SPARK_VERSION: str,
+    SPARK_VERSION,
     UNITY_CATALOG_VERSION: str,
     catalog,
     os,
@@ -129,11 +128,11 @@ def _(
         out = _Path(tempfile.gettempdir()) / "ivysettings-rendered.xml"
         out.write_text(rendered)
         return str(out)
-
+    # org.apache.hadoop:hadoop-aws:3.4.2,io.delta:delta-spark_4.2_2.13:4.4.0-rc1-SNAPSHOT,io.unitycatalog:unitycatalog-spark_4.2_2.13:0.6.0-rc1-SNAPSHOT
     config = {
         "spark.jars.packages": f"io.delta:delta-spark_{SPARK_VERSION}_2.13:{DELTA_VERSION}," +
-        f"io.unitycatalog:unitycatalog-spark_{SPARK_VERSION}_2.13:{UNITY_CATALOG_VERSION},org.apache.hadoop:hadoop-aws:{HADOOP_VERSION}," +
-        f"software.amazon.awssdk:bundle:2.29.52",
+        f"io.unitycatalog:unitycatalog-spark_{SPARK_VERSION}_2.13:{UNITY_CATALOG_VERSION},org.apache.hadoop:hadoop-aws:{HADOOP_VERSION}",
+        "spark.jars.repositories": "https://central.sonatype.com/repository/maven-snapshots/",
         "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
         "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         f"spark.sql.catalog.{catalog}": "io.unitycatalog.spark.UCSingleCatalog",
@@ -212,6 +211,12 @@ def _(mo):
 @app.cell
 def _(spark: "SparkSession"):
     spark.catalog.setCurrentCatalog("unity")
+    return
+
+
+@app.cell
+def _(spark: "SparkSession"):
+    spark.catalog.listCatalogs()
     return
 
 
@@ -603,7 +608,7 @@ def _(mo, spark: "SparkSession"):
     # View the Delta History using DeltaTable
     from delta.tables import DeltaTable
 
-    dt = DeltaTable.forName(spark, "unity.sanctuary.pets")
+    dt = DeltaTable.forName(spark, "unity.dais.pets")
 
     # view history
     mo.ui.table(dt.history())
