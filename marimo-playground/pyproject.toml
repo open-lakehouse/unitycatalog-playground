@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "delta-spark==4.1.0",
-    "marimo[recommended]>=0.20.1",
+    "marimo[recommended]>=0.23.16",
     "nbconvert>=7.17.0",
     "numpy>=2.2.6",
     "playwright>=1.58.0",

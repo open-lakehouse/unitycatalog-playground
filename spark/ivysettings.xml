@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Ivy settings template used whenever a MAVEN_PROXY_URL is configured — by both
+  `just jars` (spark-submit pre-download) and the marimo notebooks (which point
+  `spark.jars.ivySettings` at a rendered copy of this file).
+
+  Why this exists
+  ===============
+  By default Spark APPENDS `spark.jars.repositories` to its built-in resolver
+  chain (local-m2, local-ivy, repo1.maven.org, spark-packages, then the proxy),
+  so Ivy tries Maven Central and spark-packages FIRST. Behind the Databricks
+  firewall those hosts are unreachable, producing a flood of "Connection
+  refused" errors and slow resolution before every artifact finally resolves
+  from the proxy. Worse, the built-in local resolvers can pick up a delta-spark
+  you published from source with `sbt publishLocal` (a thin aggregator that
+  depends on the never-published delta-spark-v1 / delta-spark-v2 modules),
+  shadowing the self-contained release and breaking resolution entirely.
+
+  What this does instead
+  ======================
+  Replaces the whole chain with exactly two resolvers, in order:
+
+    1. databricks-proxy  — the proxy as a standard Maven2 repo. ALL released
+       artifacts (delta-spark, delta-storage, delta-kernel-*, hadoop-aws,
+       unitycatalog-spark releases, ...) resolve here. Because it is tried
+       FIRST, a locally published build can never shadow a release.
+
+    2. local-ivy         — your `sbt publishLocal` repo. Only consulted for
+       coordinates the proxy lacks, e.g. SNAPSHOTs such as
+       io.unitycatalog:unitycatalog-spark_2.13:0.5.0-SNAPSHOT. Mirrors Spark's
+       built-in local-ivy-cache layout (jar filename has no revision suffix).
+
+  Placeholders (substituted at render time)
+  =========================================
+    @MAVEN_PROXY_URL@      -> the MAVEN_PROXY_URL value (Maven2 root URL).
+    @IVY_LOCAL_ROOT@   -> absolute path to the local Ivy repo's `local` dir
+                          (e.g. /opt/ivy2/local in the container, /tmp/ivy/local
+                          for `just jars`). Passed explicitly rather than relying
+                          on ${ivy.default.ivy.user.dir}, which Spark only sets
+                          AFTER loading this file.
+-->
+<ivysettings>
+  <settings defaultResolver="main-chain"/>
+  <resolvers>
+    <chain name="main-chain" returnFirst="true">
+      <!-- Proxy FIRST: releases resolve here, so local builds never shadow them. -->
+      <ibiblio name="databricks-proxy" m2compatible="true" root="@MAVEN_PROXY_URL@"/>
+      <!-- Local Ivy repo SECOND: only for coordinates the proxy lacks (SNAPSHOTs). -->
+      <filesystem name="local-ivy" checkmodified="true" changingPattern=".*-SNAPSHOT">
+        <ivy pattern="@IVY_LOCAL_ROOT@/[organisation]/[module]/[revision]/ivys/ivy.xml"/>
+        <artifact pattern="@IVY_LOCAL_ROOT@/[organisation]/[module]/[revision]/[type]s/[artifact](-[classifier]).[ext]"/>
+      </filesystem>
+    </chain>
+  </resolvers>
+</ivysettings>

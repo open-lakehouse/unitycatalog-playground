@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.20.2"
+__generated_with = "0.23.16"
 app = marimo.App(width="medium")
 
 
@@ -33,7 +33,6 @@ def _():
 
     import os
     import marimo as mo
-    import getpass
 
     from pyspark.conf import SparkConf
     from pyspark.sql import SparkSession, DataFrame
@@ -42,13 +41,19 @@ def _():
         StringType, IntegerType, BooleanType
     )
 
-    DELTA_VERSION='4.1.0'
-    UNITY_CATALOG_VERSION='0.4.0'
+    DELTA_VERSION: str = os.environ.get("DELTA_VERSION", "4.4.0-rc1-SNAPSHOT").strip()
+    HADOOP_VERSION: str = os.environ.get("HADOOP_VERSION", "3.4.2").strip()
+    MAVEN_PROXY_URL: str = os.environ.get("MAVEN_PROXY_URL", "").strip()
+    SPARK_VERSION='4.2'
+    UNITY_CATALOG_VERSION: str=os.environ.get("UNITY_CATALOG_VERSION", "0.6.0-rc1-SNAPSHOT").strip()
     return (
         BooleanType,
         DELTA_VERSION,
         DataFrame,
+        HADOOP_VERSION,
         IntegerType,
+        MAVEN_PROXY_URL,
+        SPARK_VERSION,
         SparkConf,
         SparkSession,
         StringType,
@@ -56,31 +61,123 @@ def _():
         StructType,
         UNITY_CATALOG_VERSION,
         mo,
+        os,
     )
 
 
 @app.cell
-def _():
-    # if you're running this without the docker compose file, you'll need to change this to the url of your Unity Catalog server
-    unity_catalog_server_url = "http://unitycatalog:8080"
+def _(os):
+    # The Unity Catalog server URL. Override it with the UC_SERVER_URL env var
+    # (set in docker-compose.yaml) to point at a UC server running elsewhere.
+    # UC_SERVER_URL may be either:
+    #   - a bare host (e.g. `unitycatalog`), combined with UC_SERVER_PORT to form
+    #     http://<host>:<port> — the default for the local/in-docker quickstart, or
+    #   - a full URL including the scheme (e.g. https://uc.openlakehousedemos.dev),
+    #     which is used verbatim (handy for a remote, auth-enabled UC server).
+    # Defaults to the in-network `unitycatalog` hostname; for a local (uv) run use
+    # http://localhost:8080.
+    _uc_server = os.environ.get("UC_SERVER_URL", "unitycatalog")
+    if _uc_server.startswith(("http://", "https://")):
+        unity_catalog_server_url = _uc_server.rstrip("/")
+    else:
+        unity_catalog_server_url = f"http://{_uc_server}:{os.environ.get('UC_SERVER_PORT', '8080')}"
+
+    # Bearer token for auth-enabled Unity Catalog servers (set via UC_TOKEN).
+    # Left empty for the local docker/quickstart server, which runs without auth.
+    unity_catalog_token = os.environ.get("UC_TOKEN", "")
 
     catalog = 'unity'
-    schema = 'default'
-    return catalog, unity_catalog_server_url
+    return catalog, unity_catalog_server_url, unity_catalog_token
 
 
-@app.cell
-def _(DELTA_VERSION, UNITY_CATALOG_VERSION, catalog, unity_catalog_server_url):
+@app.cell(hide_code=True)
+def _(
+    DELTA_VERSION: str,
+    HADOOP_VERSION: str,
+    MAVEN_PROXY_URL: str,
+    SPARK_VERSION,
+    UNITY_CATALOG_VERSION: str,
+    catalog,
+    os,
+    unity_catalog_server_url,
+    unity_catalog_token,
+):
+    def _render_ivy_settings(proxy: str, ivy_dir: str | None) -> str | None:
+        """Render spark/ivysettings.xml (proxy-first + local chain) to a temp file.
+
+        Returns the rendered file path, or None if the template can't be found
+        (so the caller can fall back to `spark.jars.repositories`).
+        """
+        import tempfile
+        from pathlib import Path as _Path
+
+        local_root = f"{ivy_dir or _Path.home() / '.ivy2'}/local"
+        candidates = [_Path("/spark/ivysettings.xml")]
+        try:  # repo-relative path for local (uv) runs
+            candidates.append(_Path(__file__).resolve().parents[2] / "spark" / "ivysettings.xml")
+        except NameError:
+            pass
+        template = next((p for p in candidates if p.exists()), None)
+        if template is None:
+            return None
+        rendered = (
+            template.read_text()
+            .replace("@MAVEN_PROXY_URL@", proxy)
+            .replace("@IVY_LOCAL_ROOT@", local_root)
+        )
+        out = _Path(tempfile.gettempdir()) / "ivysettings-rendered.xml"
+        out.write_text(rendered)
+        return str(out)
+    # org.apache.hadoop:hadoop-aws:3.4.2,io.delta:delta-spark_4.2_2.13:4.4.0-rc1-SNAPSHOT,io.unitycatalog:unitycatalog-spark_4.2_2.13:0.6.0-rc1-SNAPSHOT
     config = {
-        "spark.jars.packages": f"io.delta:delta-spark_4.1_2.13:{DELTA_VERSION}," +
-        f"io.unitycatalog:unitycatalog-spark_2.13:{UNITY_CATALOG_VERSION}",
+        "spark.jars.packages": f"io.delta:delta-spark_{SPARK_VERSION}_2.13:{DELTA_VERSION}," +
+        f"io.unitycatalog:unitycatalog-spark_{SPARK_VERSION}_2.13:{UNITY_CATALOG_VERSION},org.apache.hadoop:hadoop-aws:{HADOOP_VERSION}",
+        "spark.jars.repositories": "https://central.sonatype.com/repository/maven-snapshots/",
         "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
         "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         f"spark.sql.catalog.{catalog}": "io.unitycatalog.spark.UCSingleCatalog",
         f"spark.sql.catalog.{catalog}.uri": unity_catalog_server_url,
-        f"spark.sql.catalog.{catalog}.token": "",
+        f"spark.sql.catalog.{catalog}.token": unity_catalog_token,
         "spark.sql.defaultCatalog": catalog,
+        "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+        "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
     }
+
+    # When the local stack backs Unity Catalog with the bundled RustFS object
+    # store, managed tables live on s3://…. UC vends the S3 credentials at query
+    # time, but the endpoint / path-style / plaintext-HTTP switches are
+    # client-side, so set them here from S3_ENDPOINT_URL. Leave it empty for AWS
+    # S3 or a remote UC on real S3 (this block is then skipped); `just uc=local`
+    # sets it to the in-network RustFS service automatically.
+    s3_endpoint = os.environ.get("S3_ENDPOINT_URL", "").strip()
+    if s3_endpoint:
+        config["spark.hadoop.fs.s3a.endpoint"] = s3_endpoint
+        config["spark.hadoop.fs.s3a.endpoint.region"] = os.environ.get("S3_REGION", "us-east-1").strip() or "us-east-1"
+        config["spark.hadoop.fs.s3a.path.style.access"] = "true"
+        config["spark.hadoop.fs.s3a.connection.ssl.enabled"] = "false"
+
+    # When running inside the docker container, the host's local Ivy repository is
+    # bind-mounted (see docker-compose.yaml) and SPARK_JARS_IVY is set to /opt/ivy2.
+    # Pointing Spark at it makes any locally published unitycatalog-spark SNAPSHOT
+    # resolvable from `${SPARK_JARS_IVY}/local`. Running locally (`just run`/uv)
+    # leaves SPARK_JARS_IVY unset, so Spark uses the default ~/.ivy2 on your laptop.
+    ivy_dir = os.environ.get("SPARK_JARS_IVY")
+    if ivy_dir:
+        config["spark.jars.ivy"] = ivy_dir
+
+    if MAVEN_PROXY_URL:
+        # Behind the firewall, resolve everything through a proxy-first Ivy
+        # resolver (spark/ivysettings.xml) instead of Spark's default
+        # `spark.jars.repositories`, which only APPENDS the proxy and so probes
+        # the unreachable repo1.maven.org / spark-packages first (the "Connection
+        # refused" noise) and can let a locally published delta-spark shadow the
+        # release. _render_ivy_settings renders the template; on miss it falls
+        # back to the old append behaviour so resolution still works.
+        rendered = _render_ivy_settings(MAVEN_PROXY_URL, ivy_dir)
+        if rendered:
+            config["spark.jars.ivySettings"] = rendered
+        else:
+            config["spark.jars.repositories"] = MAVEN_PROXY_URL
     return (config,)
 
 
@@ -113,9 +210,36 @@ def _(mo):
 
 @app.cell
 def _(spark: "SparkSession"):
-    spark.sql(f"""
-      CREATE SCHEMA IF NOT EXISTS unity.sanctuary
+    spark.catalog.setCurrentCatalog("unity")
+    return
+
+
+@app.cell
+def _(spark: "SparkSession"):
+    spark.catalog.listCatalogs()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Tip: In order to execute CREATE SCHEMA you'll need the following permissions
+    1. You'll need `USE CATALOG` on the catalog `unity`
+    2. You'll need `CREATE SCHEMA` for the catalog `unity`
     """)
+    return
+
+
+@app.cell
+def _(spark: "SparkSession"):
+    spark.sql("CREATE SCHEMA IF NOT EXISTS unity.sanctuary")
+    return
+
+
+@app.cell
+def _(spark: "SparkSession"):
+    # this is a way of setting unity.sanctuary automagicaly
+    spark.catalog.setCurrentDatabase("sanctuary")
     return
 
 
@@ -134,7 +258,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(
     BooleanType,
     DataFrame,
@@ -215,7 +339,7 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(DataFrame, SparkSession, StructType):
     def create_table_ddl(
         table_name: str,
@@ -294,6 +418,19 @@ def _(ddl):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## UC Permissions
+    In order to create a table within a Schema owned by a Catalog (`catalog.schema`), you'll need the following permission🥇
+
+    1. `CREATE TABLE`
+
+    2. In order to `view` the data, you will also need `SELECT` on the table.
+    """)
+    return
+
+
 @app.cell
 def _(
     create_table_using_sql,
@@ -359,7 +496,7 @@ def _(mo):
     {
       "name": "pets",
       "catalog_name": "unity",
-      "schema_name": "sanctuary",
+      "schema_name": "dias",
       "table_type": "MANAGED",
       "data_source_format": "DELTA",
       "columns": [],
@@ -478,18 +615,6 @@ def _(mo, spark: "SparkSession"):
     return (dt,)
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## Limitations
-    At this point in time there are some limitations when using Catalog Managed Tables given this feature is still experimental.
-
-    1. `DeltaTableBuilder` will fail to generate a new Catalog Managed Table. This is a known limitation and we're working on support.
-    2. Vacuum Support - `DeltaTable.forName(spark, "unity.sanctuary.pets").vacuum()` will fail with `UnsupportedOperationException` **[DELTA_UNSUPPORTED_VACUUM_ON_MANAGED_TABLE]**.
-    """)
-    return
-
-
 @app.cell
 def _(dt):
     # this will fail at this point in time (Delta 4.1 with Unity Catalog 0.4.0)
@@ -522,14 +647,6 @@ def _(spark: "SparkSession"):
 @app.cell(disabled=True)
 def _(spark: "SparkSession"):
     spark.sql("DROP SCHEMA unity.sanctuary")
-    return
-
-
-@app.cell(disabled=True)
-def _():
-    import subprocess
-    result = subprocess.run(["java", "-version"], capture_output=True, text=True)
-    print(result.stderr)
     return
 
 
