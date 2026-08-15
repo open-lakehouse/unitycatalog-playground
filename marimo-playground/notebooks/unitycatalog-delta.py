@@ -232,20 +232,20 @@ def _(mo):
 
 @app.cell
 def _(spark: "SparkSession"):
-    spark.sql("CREATE SCHEMA IF NOT EXISTS unity.dais")
+    spark.sql("CREATE SCHEMA IF NOT EXISTS unity.sanctuary")
     return
 
 
 @app.cell
 def _(spark: "SparkSession"):
-    # this is a way of setting unity.dais automagicaly
-    spark.catalog.setCurrentDatabase("dais")
+    # this is a way of setting unity.sanctuary automagicaly
+    spark.catalog.setCurrentDatabase("sanctuary")
     return
 
 
 @app.cell
 def _(spark: "SparkSession"):
-    spark.sql("DESCRIBE SCHEMA unity.dais").show()
+    spark.sql("DESCRIBE SCHEMA unity.sanctuary").show()
     return
 
 
@@ -403,7 +403,7 @@ def _(create_table_ddl, litter_one, pets_to_dataframe, spark: "SparkSession"):
     pets_schema = df.schema
     props = {'delta.feature.catalogManaged': 'supported'}
 
-    uc_schema = 'dais'
+    uc_schema = 'sanctuary'
     uc_table = 'pets'
 
     # note: because we are using the io.unitycatalog.spark.UCSingleCatalog the defaultCatalog `unity`
@@ -461,7 +461,7 @@ def _(df, uc_schema, uc_table):
 
 @app.cell
 def _(spark: "SparkSession"):
-    spark.sql("select * from dais.pets").show()
+    spark.sql("select * from sanctuary.pets").show()
     return
 
 
@@ -474,7 +474,7 @@ def _(pets, pets_to_dataframe, spark: "SparkSession", uc_schema, uc_table):
 
 @app.cell
 def _(spark: "SparkSession"):
-    spark.sql("select count(*) as total from dais.pets").show()
+    spark.sql("select count(*) as total from sanctuary.pets").show()
     return
 
 
@@ -496,7 +496,7 @@ def _(mo):
     {
       "name": "pets",
       "catalog_name": "unity",
-      "schema_name": "sanctuary",
+      "schema_name": "dias",
       "table_type": "MANAGED",
       "data_source_format": "DELTA",
       "columns": [],
@@ -608,7 +608,7 @@ def _(mo, spark: "SparkSession"):
     # View the Delta History using DeltaTable
     from delta.tables import DeltaTable
 
-    dt = DeltaTable.forName(spark, "unity.dais.pets")
+    dt = DeltaTable.forName(spark, "unity.sanctuary.pets")
 
     # view history
     mo.ui.table(dt.history())
@@ -639,14 +639,14 @@ def _(mo):
 @app.cell(disabled=True)
 def _(spark: "SparkSession"):
     spark.sql(f"""
-    DROP TABLE unity.dais.pets
+    DROP TABLE unity.sanctuary.pets
     """)
     return
 
 
 @app.cell(disabled=True)
 def _(spark: "SparkSession"):
-    spark.sql("DROP SCHEMA unity.dais")
+    spark.sql("DROP SCHEMA unity.sanctuary")
     return
 
 

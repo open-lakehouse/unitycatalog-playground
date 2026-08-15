@@ -51,13 +51,10 @@ notebook_dir := "marimo-playground"
 jars_dir := "spark/jars"
 
 # Maven coordinates pre-downloaded by `just jars` to speed up notebook startup.
-# Keep these in sync with the `spark.jars.packages` used in the notebooks. The
-# unitycatalog 0.5.0-SNAPSHOT is intentionally omitted — it resolves from the
-# local Ivy repo (publishLocal), not a Maven repository. Add iceberg here once a
-# notebook references it (no Spark 4.1 runtime is published yet).
+# Keep these in sync with the `spark.jars.packages` used in the notebooks.
 
 # uncomment this to copy the public uc jars
-jars_packages := "io.delta:delta-spark_4.2_2.13:4.4.0-SNAPSHOT,io.unitycatalog:unitycatalog-spark_4.2_2.13:0.6.0,org.apache.hadoop:hadoop-aws:3.4.2,software.amazon.awssdk:bundle:2.29.52"
+jars_packages := "io.delta:delta-spark_4.2_2.13:4.4.0,io.unitycatalog:unitycatalog-spark_4.2_2.13:0.6.0,org.apache.hadoop:hadoop-aws:3.4.2,software.amazon.awssdk:bundle:2.29.52"
 # ---- Meta -------------------------------------------------------------------
 
 # Show all available recipes (default when running bare `just`).
