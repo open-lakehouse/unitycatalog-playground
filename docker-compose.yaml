@@ -185,6 +185,10 @@ services:
       # custom-endpoint / path-style / plaintext toggles.
       - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-}
       - S3_REGION=${S3_REGION:-us-east-1}
+      # Spark major.minor version the notebook uses to resolve Maven packages in
+      # `spark.jars.packages` (delta-spark / unitycatalog-spark coordinates). Must
+      # be major.minor (e.g. 4.2); the notebook trims it and falls back to 4.2.
+      - SPARK_VERSION=${SPARK_VERSION:-4.2}
     volumes:
       - type: bind
         source: ./marimo-playground/notebooks
