@@ -1,7 +1,7 @@
 FROM apache/spark:4.2.0-java21-python3
 
 ARG PYSPARK_VERSION=4.2.0
-ARG DELTA_SPARK_VERSION=4.4.0rc1.dev1
+ARG DELTA_SPARK_VERSION=4.4.0
 ARG MARIMO_VERSION=0.23.16
 
 # Optional pre-release override: filename of a locally-staged wheel under
