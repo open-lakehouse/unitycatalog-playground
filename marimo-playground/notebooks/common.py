@@ -32,6 +32,8 @@ __all__ = [
     "DELTA_VERSION",
     "HADOOP_VERSION",
     "MAVEN_PROXY_URL",
+    "SPARK_DRIVER_CORES",
+    "SPARK_DRIVER_MEMORY",
     "SPARK_VERSION",
     "UNITY_CATALOG_VERSION",
     "create_table_ddl",
@@ -63,7 +65,17 @@ UNITY_CATALOG_VERSION: str = os.environ.get("UNITY_CATALOG_VERSION", "0.6.0").st
 
 CATALOG: str = "unity"
 DEFAULT_APP_NAME: str = "DeltaCatalogManagedTables"
-DEFAULT_MASTER: str = "local[*]"
+
+# Driver JVM resources for the local Spark session. The notebooks run Spark in
+# local[N] mode, so the whole job executes in ONE (driver) JVM: spark.driver.memory
+# is the real heap cap (-Xmx) and the master's local[N] governs task parallelism.
+# Defaults floor a simple local test at 4 CPUs / 4g — the stock ~1g heap trips
+# "Total allocation exceeds 95.00% of heap" warnings on real writes. Override via
+# the env vars (SPARK_DRIVER_CORES=* uses every core; SPARK_MASTER overrides the
+# master outright). See initialize() for why memory must be set before getOrCreate.
+SPARK_DRIVER_MEMORY: str = os.environ.get("SPARK_DRIVER_MEMORY", "4g").strip() or "4g"
+SPARK_DRIVER_CORES: str = os.environ.get("SPARK_DRIVER_CORES", "4").strip() or "4"
+DEFAULT_MASTER: str = os.environ.get("SPARK_MASTER", f"local[{SPARK_DRIVER_CORES}]")
 
 
 def unity_catalog_server_url() -> str:
@@ -197,6 +209,17 @@ def initialize(
 ) -> SparkSession:
     """Build (or reuse) the SparkSession the notebooks run against."""
     conf = SparkConf().setMaster(master).setAppName(app_name)
+
+    # Allocate the driver JVM resources BEFORE the session is built. PySpark
+    # forwards these to spark-submit when it launches the driver JVM, so
+    # spark.driver.memory sizes the heap (-Xmx) — it can't grow after the JVM
+    # starts, so changing it needs a fresh session (restart the marimo kernel).
+    # In local[N] mode the master's local[N] drives task parallelism; setting
+    # spark.driver.cores is a no-op there but honored for cluster masters.
+    conf = conf.set("spark.driver.memory", SPARK_DRIVER_MEMORY)
+    if SPARK_DRIVER_CORES.isdigit():
+        conf = conf.set("spark.driver.cores", SPARK_DRIVER_CORES)
+
     for key, value in spark_config(catalog, server_url, token, extra_config).items():
         conf = conf.set(key, value)
 

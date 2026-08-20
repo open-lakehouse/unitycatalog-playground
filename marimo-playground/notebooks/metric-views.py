@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.16"
+__generated_with = "0.24.0"
 app = marimo.App(width="medium")
 
 
@@ -28,10 +28,6 @@ def _(mo):
     > **Prerequisites.** Metric views need **Apache Spark 4.2+** (the
     > `CREATE VIEW ... WITH METRICS` DDL landed in 4.2) and the **UC 0.6.0**
     > Spark 4.2 connector (`io.unitycatalog:unitycatalog-spark_4.2_2.13:0.6.0`).
-    > This playground already resolves that connector plus
-    > `io.delta:delta-spark_4.2_2.13:4.4.0`, so — unlike the upstream doc, which
-    > uses a parquet external table because it launches without `delta-spark` —
-    > we can use a catalog-managed **Delta** table as the metric-view source.
     """)
     return
 
@@ -210,7 +206,7 @@ def _(mo):
 
 
 @app.cell
-def _(FQ_SCHEMA, SCHEMA, ecomm_ready, spark):
+def _(FQ_SCHEMA, SCHEMA, ecomm_ready, spark: "SparkSession"):
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {FQ_SCHEMA}")
     spark.catalog.setCurrentCatalog(ecomm_ready)
     spark.catalog.setCurrentDatabase(SCHEMA)
@@ -219,7 +215,7 @@ def _(FQ_SCHEMA, SCHEMA, ecomm_ready, spark):
 
 
 @app.cell
-def _(schema_ready, spark):
+def _(schema_ready, spark: "SparkSession"):
     spark.sql(f"DESCRIBE SCHEMA {schema_ready}").show(truncate=False)
     return
 
@@ -373,14 +369,14 @@ def _(
 
 
 @app.cell
-def _(DataFrame, generate_orders, orders_to_dataframe, spark):
+def _(DataFrame, generate_orders, orders_to_dataframe, spark: "SparkSession"):
     orders_df: DataFrame = orders_to_dataframe(generate_orders(total=500), spark)
     orders_df.show(5, truncate=False)
     return (orders_df,)
 
 
 @app.cell
-def _(FQ_TABLE, common, orders_df):
+def _(FQ_TABLE, common, orders_df: "DataFrame"):
     # `create_table_ddl` renders 99% of the DDL from the DataFrame schema. We add
     # the catalog-managed feature flag + partition-by below in the explicit
     # CREATE so re-runs are deterministic.
@@ -390,7 +386,7 @@ def _(FQ_TABLE, common, orders_df):
 
 
 @app.cell
-def _(FQ_TABLE, schema_ready, spark):
+def _(FQ_TABLE, spark: "SparkSession"):
     # Catalog-managed Delta table, partitioned by the metric-view dimension.
     spark.sql(f"""
     CREATE TABLE IF NOT EXISTS {FQ_TABLE} (
@@ -415,7 +411,7 @@ def _(FQ_TABLE, schema_ready, spark):
 
 
 @app.cell
-def _(orders_df, table_ready):
+def _(orders_df: "DataFrame", table_ready):
     # overwrite (not append) keeps counts stable across full notebook re-runs
     (
         orders_df.write
@@ -428,7 +424,7 @@ def _(orders_df, table_ready):
 
 
 @app.cell
-def _(FQ_TABLE, spark, written):
+def _(FQ_TABLE, spark: "SparkSession", written):
     # Confirm the load and how many rows land inside the trailing-7-day window
     # the metric view will filter on.
     _ = written
@@ -470,28 +466,28 @@ def _(mo):
 
 
 @app.cell
-def _(FQ_METRIC_VIEW, FQ_TABLE, spark, written):
+def _(FQ_METRIC_VIEW, FQ_TABLE, spark: "SparkSession", written):
     _ = written
     spark.sql(f"DROP VIEW IF EXISTS {FQ_METRIC_VIEW}")
 
     create_metric_view = f"""CREATE VIEW {FQ_METRIC_VIEW}
-WITH METRICS
-LANGUAGE YAML
-AS $$
-version: "0.1"
-source: {FQ_TABLE}
-filter: created_at >= current_timestamp() - INTERVAL 7 DAYS AND status NOT IN ('CANCELLED', 'RETURNED')
-dimensions:
-  - name: region
-    expr: region
-measures:
-  - name: last_7_day_sales
-    expr: sum(amount)
-  - name: order_count
-    expr: count(1)
-  - name: avg_order_amount
-    expr: avg(amount)
-$$"""
+    WITH METRICS
+    LANGUAGE YAML
+    AS $$
+    version: "0.1"
+    source: {FQ_TABLE}
+    filter: created_at >= current_timestamp() - INTERVAL 7 DAYS AND status NOT IN ('CANCELLED', 'RETURNED')
+    dimensions:
+      - name: region
+        expr: region
+    measures:
+      - name: last_7_day_sales
+        expr: sum(amount)
+      - name: order_count
+        expr: count(1)
+      - name: avg_order_amount
+        expr: avg(amount)
+    $$"""
 
     print(create_metric_view)
     spark.sql(create_metric_view)
@@ -513,7 +509,7 @@ def _(mo):
 
 
 @app.cell
-def _(FQ_SCHEMA, metric_view_ready, spark):
+def _(FQ_SCHEMA, metric_view_ready, spark: "SparkSession"):
     _ = metric_view_ready
     print("SHOW VIEWS:")
     spark.sql(f"SHOW VIEWS IN {FQ_SCHEMA}").show(truncate=False)
@@ -523,7 +519,7 @@ def _(FQ_SCHEMA, metric_view_ready, spark):
 
 
 @app.cell
-def _(FQ_METRIC_VIEW, metric_view_ready, spark):
+def _(FQ_METRIC_VIEW, metric_view_ready, spark: "SparkSession"):
     _ = metric_view_ready
     spark.sql(f"DESCRIBE EXTENDED {FQ_METRIC_VIEW}").show(truncate=False)
     return
@@ -545,7 +541,7 @@ def _(mo):
 
 
 @app.cell
-def _(FQ_METRIC_VIEW, metric_view_ready, spark):
+def _(FQ_METRIC_VIEW, metric_view_ready, spark: "SparkSession"):
     _ = metric_view_ready
     spark.sql(f"""
     SELECT
@@ -591,7 +587,7 @@ def _(mo):
 
 
 @app.cell(disabled=True)
-def _(FQ_METRIC_VIEW, FQ_TABLE, spark):
+def _(FQ_METRIC_VIEW, FQ_TABLE, spark: "SparkSession"):
     # Enable this cell to tear the demo objects back down.
     spark.sql(f"DROP VIEW IF EXISTS {FQ_METRIC_VIEW}")
     spark.sql(f"DROP TABLE IF EXISTS {FQ_TABLE}")

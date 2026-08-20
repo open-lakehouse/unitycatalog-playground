@@ -18,7 +18,7 @@ services:
   unitycatalog:
     profiles:
       - local-uc
-    image: newfrontdocker/unitycatalog:v0.6.0
+    image: unitycatalog/unitycatalog:v0.6.0
     hostname: unitycatalog
     container_name: unitycatalog
     depends_on:
@@ -189,6 +189,15 @@ services:
       # `spark.jars.packages` (delta-spark / unitycatalog-spark coordinates). Must
       # be major.minor (e.g. 4.2); the notebook trims it and falls back to 4.2.
       - SPARK_VERSION=${SPARK_VERSION:-4.2}
+      # CPU / RAM for the local Spark session the notebooks build. They run Spark
+      # in local[N] mode, so the whole job runs in ONE (driver) JVM:
+      # SPARK_DRIVER_MEMORY is the real heap cap (spark.driver.memory / -Xmx) and
+      # SPARK_DRIVER_CORES becomes local[N] task parallelism. Defaults floor a
+      # simple test at 4 CPUs / 4g so notebooks don't run out of heap; raise them
+      # for heavier work (SPARK_DRIVER_CORES=* uses every core). Make sure Docker
+      # is allowed at least SPARK_DRIVER_MEMORY of RAM or the JVM gets OOM-killed.
+      - SPARK_DRIVER_MEMORY=${SPARK_DRIVER_MEMORY:-4g}
+      - SPARK_DRIVER_CORES=${SPARK_DRIVER_CORES:-4}
     volumes:
       - type: bind
         source: ./marimo-playground/notebooks
