@@ -156,13 +156,51 @@ else it falls back to AWS STS (unreachable). RustFS — like MinIO — rejects a
 token it didn't issue, so `rustfs-init` mints a real RustFS STS token for UC to
 vend. The bootstrap logic lives in `etc/rustfs/bootstrap.sh`.
 
-The vended STS credential **expires** (default 12h). When managed-table
-reads/writes start failing with credential errors, refresh it with
-`just uc=local rotate-creds` (re-mints + restarts UC; bucket data is untouched).
-Object data is in the `rustfs_data` volume; `uc_conf` is regenerated each `up`.
-The notebooks set the client-side `fs.s3a.endpoint` / path-style / plaintext
-toggles from `S3_ENDPOINT_URL` (injected as `http://rustfs:9000` by `just
-uc=local`); UC still vends the credentials.
+The vended STS credential **expires** (default 12h, `STS_DURATION_SECONDS`).
+When managed-table reads/writes start failing with credential errors, refresh
+it with `just uc=local rotate-creds` (re-mints + restarts UC; bucket data is
+untouched). Object data is in the `rustfs_data` volume; `uc_conf` is regenerated
+each `up`. The notebooks set the client-side `fs.s3a.endpoint` / path-style /
+plaintext toggles from `S3_ENDPOINT_URL` (injected as `http://rustfs:9000` by
+`just uc=local`); UC still vends the credentials.
+
+#### Troubleshooting: `403 Forbidden` / `AccessDeniedException` on managed tables
+
+Symptom — a `CREATE TABLE`, write, or read against a `unity.*` managed table
+fails with something like:
+
+```
+java.nio.file.AccessDeniedException: s3://uc-warehouse/__unitystorage/tables/<uuid>/_delta_log/_last_checkpoint:
+getFileStatus on s3://.../_last_checkpoint:
+software.amazon.awssdk.services.s3.model.S3Exception: Forbidden
+(Service: S3, Status Code: 403, Request ID: ...)
+```
+
+**This is an expired/invalid credential, not a missing object.** A brand-new
+table has no `_last_checkpoint` yet, so a valid credential would get a `404`
+(mapped to "not found"). A **`403`** means RustFS is *rejecting the credential*
+Spark is using.
+
+Root cause — UC reads `server.properties` (and thus the STS token) **only at
+startup**. The STS token lives ~12h, but the `unitycatalog` container often runs
+longer. A later `just uc=local up` re-runs `rustfs-init` and writes a **fresh**
+token into the `uc_conf` volume, but if it only *recreates `marimo-spark`* and
+leaves `unitycatalog` **Running** (not restarted), UC keeps vending the stale
+in-memory token. RustFS rejects it → `403`. Confirm with
+`docker ps` — if `unitycatalog` shows a much longer uptime than its STS lifetime
+(e.g. `Up 5 days`), it's serving an expired credential.
+
+Fix:
+
+```bash
+just uc=local rotate-creds   # re-mint STS token + restart UC so it reloads it
+```
+
+Then **restart the Spark session** so it re-fetches the now-valid vended
+credential — S3A caches the filesystem/credential for the life of a session, so
+an already-running notebook keeps hitting the stale one. Either restart the
+marimo kernel and re-run from the `common.initialize(...)` cell, or
+`docker restart marimo-spark` and reopen the printed URL.
 
 ### Network
 
