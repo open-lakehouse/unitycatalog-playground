@@ -49,6 +49,8 @@ brew install just
 open -a Docker
 ```
 
+### Start the stack
+
 After Docker Desktop is running:
 
 ```bash
@@ -57,18 +59,67 @@ cd unitycatalog-playground
 just uc=local start
 ```
 
-The first start builds the two notebook images and may take several minutes.
-When the environment is ready, the command prints a URL for each notebook
-service:
+This builds two notebook images and starts them next to Unity Catalog,
+PostgreSQL, and RustFS. The first build downloads Spark and the Python
+dependencies, so it can take several minutes. When the environment is ready,
+the command prints a URL for each notebook service:
 
 ```text
 http://localhost:2718/?access_token=...   # Delta (marimo-spark)
 http://localhost:2719/?access_token=...   # Iceberg (marimo-iceberg)
 ```
 
-Open the first URL, select `unitycatalog-delta.py`, and run the notebook cells in
-order. You will create a Unity Catalog schema and a catalog-managed Delta table,
-write sample data through Spark, and query it again.
+The two images talk to the same Unity Catalog server and the same `unity`
+catalog. They are separate because Apache Iceberg doesn't publish a Spark 4.2
+runtime yet:
+
+| Image | Port | Stack | Print the URL again |
+| --- | --- | --- | --- |
+| `marimo-spark` | 2718 | Spark 4.2, Delta Lake 4.4, Unity Catalog Spark connector | `just url` |
+| `marimo-iceberg` | 2719 | Spark 4.1.3, Apache Iceberg 1.11, PyIceberg 0.12 | `just url-iceberg` |
+
+### Delta tables in `marimo-spark` (port 2718)
+
+1. Open the `2718` URL and select `unitycatalog-delta.py`.
+2. Run the cells in order. The notebook creates the `unity.sanctuary` schema and
+   the catalog-managed Delta table `unity.sanctuary.pets`, writes 100 pets to it
+   in batches through Spark, and queries them back.
+
+The first Spark session downloads `delta-spark`, `unitycatalog-spark`, and
+`hadoop-aws` from Maven, so the cell that starts Spark can take a few minutes
+the first time. Later sessions reuse the jars cached in `~/.ivy2`.
+
+Then try `metric-views.py` or `delta-new-in-4.4.0.py`. This service also lists
+the `iceberg/` folder, but those notebooks only run in `marimo-iceberg`.
+
+### Iceberg tables in `marimo-iceberg` (port 2719)
+
+1. Open the `2719` URL and select `unitycatalog-iceberg-spark.py`.
+2. Run the cells in order. Spark connects through Unity Catalog's Iceberg REST
+   catalog, creates the `unity.iceberg_spark` namespace and a partitioned managed
+   table, `adoptions`, then runs `UPDATE` / `DELETE` / `MERGE`, time travel, and
+   schema evolution. It finishes with a CTAS + rename (`shelter_summary`) and an
+   external table (`adoptions_archive`).
+3. Open `unitycatalog-pyiceberg.py` to use the same catalog from Python with no
+   JVM. It creates `unity.iceberg_py.pets` and `unity.iceberg_py.adopted_pets`.
+
+The Spark notebook's first session downloads `iceberg-spark-runtime` and
+`iceberg-aws-bundle`. The PyIceberg notebook doesn't start Spark, so it runs
+right away.
+
+### See both table formats in Unity Catalog
+
+Both images register their tables in the same catalog. List them through the
+Unity Catalog REST API:
+
+```bash
+curl -s 'http://localhost:8080/api/2.1/unity-catalog/tables?catalog_name=unity&schema_name=sanctuary'
+curl -s 'http://localhost:8080/api/2.1/unity-catalog/tables?catalog_name=unity&schema_name=iceberg_spark'
+```
+
+Each table's `data_source_format` is `DELTA` or `ICEBERG`. The table files live
+in the `uc-warehouse` bucket, which you can browse in the RustFS console at
+<http://localhost:9001> (log in with `rustfsadmin` / `rustfsadmin`).
 
 The local services are available at:
 

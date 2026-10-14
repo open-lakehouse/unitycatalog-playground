@@ -386,8 +386,8 @@ marimo-playground/
 delta/scala/catalog-managed.scala
 ```
 
-The `marimo-spark` entrypoint opens `marimo-playground/notebooks/unitycatalog-delta.py`
-on port **2718**; `marimo-iceberg` opens the `notebooks/iceberg/` directory on
+The `marimo-spark` entrypoint serves the `marimo-playground/notebooks/` directory
+on port **2718**; `marimo-iceberg` serves the `notebooks/iceberg/` directory on
 **2719**. Notebooks are bind-mounted, so host edits appear in both
 containers. The bundled UC server listens on **8080** when `uc=local`, with
 Postgres on **5432** (metadata volume `uc_postgres_data`) and RustFS on **9000**
