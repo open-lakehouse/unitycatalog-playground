@@ -40,7 +40,7 @@ shared_network := "uc-shared"
 
 # Name/tag of the marimo + spark image built from the local Dockerfile.
 image := "marimo-spark"
-tag   := "latest"
+tag   := "local"
 
 # Optional pip proxy used at image build time (corporate mirrors, etc).
 # Override per-invocation, e.g. `just pypi_proxy_url=https://pypi.acme.com/simple build`.
@@ -329,23 +329,55 @@ clean: down-volumes
     -docker image rm {{iceberg_image}}:{{tag}}
 
 # ---- Local notebook workflow (uv, no docker) --------------------------------
-
+#
+# pyproject.toml has one dependency group per notebook image: `delta` (default,
+# Spark 4.2) and `iceberg` (Spark 4.1 + PyIceberg). They conflict, so the venv
+# holds one at a time; switching between them re-syncs pyspark.
+#
 # Behind a PyPI proxy, uv re-locks on every sync and writes the proxy's URLs
-# into uv.lock; clean-lock points them back at public PyPI for CI.
-# Install the marimo project's Python dependencies with uv, then clean uv.lock.
+# into uv.lock; clean-lock points them back at public PyPI for CI. --frozen
+# keeps `uv run` from re-locking (and re-dirtying uv.lock) after a sync.
+
+iceberg_group := "--no-default-groups --group iceberg"
+export_flags  := "--frozen --format requirements-txt --no-emit-project --no-default-groups"
+
+# Install the Delta (Spark 4.2) dependencies with uv, then clean uv.lock.
 sync:
     cd {{notebook_dir}} && uv sync
     @{{just_executable()}} clean-lock
+
+# Install the Iceberg (Spark 4.1 + PyIceberg) dependencies with uv, then clean uv.lock.
+sync-iceberg:
+    cd {{notebook_dir}} && uv sync {{iceberg_group}}
+    @{{just_executable()}} clean-lock
+
+# Re-lock after editing pyproject.toml, clean uv.lock, and re-export both image requirements files.
+lock:
+    cd {{notebook_dir}} && uv lock
+    @{{just_executable()}} clean-lock
+    cd {{notebook_dir}} && uv export {{export_flags}} --group delta --output-file requirements.lock
+    cd {{notebook_dir}} && uv export {{export_flags}} --group iceberg --output-file requirements-iceberg.lock
 
 # Rewrite private PyPI proxy URLs in uv.lock to public PyPI (idempotent).
 clean-lock:
     @scripts/clean-uv-lock.py
 
-# Fail if uv.lock references a private PyPI proxy (CI / pre-commit guard).
+# Fail if uv.lock references a private index or the image requirements files are stale (CI guard).
 check-lock:
-    @scripts/clean-uv-lock.py --check
-
-# --frozen keeps `uv run` from re-locking (and re-dirtying uv.lock) after `sync`.
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/clean-uv-lock.py --check
+    cd {{notebook_dir}}
+    stale=0
+    for pair in delta:requirements.lock iceberg:requirements-iceberg.lock; do
+        group="${pair%%:*}" file="${pair#*:}"
+        if ! diff -u <(grep -v '^ *#' "$file") \
+                     <(uv export {{export_flags}} --group "$group" | grep -v '^ *#') >/dev/null; then
+            echo "$file is out of date with uv.lock; run \`just lock\`" >&2
+            stale=1
+        fi
+    done
+    exit "$stale"
 
 # Open the Unity Catalog notebook locally in edit mode.
 edit: sync
@@ -355,6 +387,6 @@ edit: sync
 run: sync
     cd {{notebook_dir}} && uv run --frozen marimo run notebooks/unitycatalog-delta.py
 
-# Open the native Iceberg notebooks locally (pyspark 4.1 from pyproject.toml).
-edit-iceberg: sync
-    cd {{notebook_dir}} && SPARK_VERSION=4.1 uv run --frozen marimo edit notebooks/iceberg/
+# Open the native Iceberg notebooks locally (Spark 4.1 + PyIceberg).
+edit-iceberg: sync-iceberg
+    cd {{notebook_dir}} && SPARK_VERSION=4.1 uv run --frozen {{iceberg_group}} marimo edit notebooks/iceberg/

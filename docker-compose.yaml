@@ -1,5 +1,7 @@
 name: unitycatalog-playground
 
+# Version tags document the selected release; multi-architecture manifest
+# digests make every dependency immutable across Intel and ARM hosts.
 services:
   # Bundled local Unity Catalog server. Gated behind the `local-uc` profile so a
   # plain `docker compose up` runs ONLY marimo-spark (talking to a remote/managed
@@ -58,7 +60,7 @@ services:
   rustfs:
     profiles:
       - local-uc
-    image: rustfs/rustfs:latest
+    image: rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
     hostname: rustfs
     container_name: rustfs
     environment:
@@ -96,7 +98,7 @@ services:
   rustfs-init:
     profiles:
       - local-uc
-    image: amazon/aws-cli:latest
+    image: amazon/aws-cli:2.36.23@sha256:c7b16ed4f08f8a61634d9c219dd2388cf61c5425f3c096b5a5b235521d7ea5cc
     container_name: rustfs-init
     depends_on:
       rustfs:
@@ -135,7 +137,7 @@ services:
   postgres:
     profiles:
       - local-uc
-    image: postgres:16.3
+    image: postgres:16.3@sha256:d0f363f8366fbc3f52d172c6e76bc27151c3d643b870e1062b4e8bfe65baf609
     hostname: postgres
     container_name: unitycatalog-postgres
     restart: unless-stopped
@@ -165,7 +167,7 @@ services:
       - unity
 
   marimo-spark:
-    image: marimo-spark:latest
+    image: marimo-spark:local
     build:
       context: .
       args:
@@ -253,7 +255,7 @@ services:
   # because iceberg-spark-runtime does not exist for Spark 4.2 (marimo-spark).
   # Environment / mounts mirror marimo-spark; see the comments there.
   marimo-iceberg:
-    image: marimo-iceberg:latest
+    image: marimo-iceberg:local
     build:
       context: .
       dockerfile: Dockerfile.iceberg

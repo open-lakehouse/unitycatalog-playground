@@ -1,0 +1,91 @@
+name: Local stack
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-stack-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-test:
+    name: Build and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SPARK_DRIVER_CORES: "2"
+      SPARK_DRIVER_MEMORY: 3g
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - name: Validate configuration
+        run: |
+          docker compose version
+          docker compose --profile local-uc config --quiet
+          just --list >/dev/null
+
+      - name: Check dependency locks
+        run: just check-lock
+
+      - name: Build marimo-spark and marimo-iceberg images
+        run: just uc=local build
+
+      - name: Start local Unity Catalog stack
+        run: just uc=local up-detached
+
+      - name: Wait for Unity Catalog and marimo
+        run: |
+          curl --fail --silent --show-error \
+            --retry 45 --retry-delay 2 --retry-all-errors \
+            http://localhost:8080/api/2.1/unity-catalog/catalogs \
+            >/tmp/catalogs.json
+          curl --fail --silent --show-error \
+            --retry 45 --retry-delay 2 --retry-all-errors \
+            http://localhost:2718 \
+            >/dev/null
+          curl --fail --silent --show-error \
+            --retry 45 --retry-delay 2 --retry-all-errors \
+            http://localhost:2719 \
+            >/dev/null
+
+      - name: Run managed-table smoke notebook
+        run: |
+          docker compose --profile local-uc exec -T marimo-spark \
+            marimo export html \
+            /opt/workspace/marimo-playground/notebooks/ci-smoke.py \
+            --output /tmp/ci-smoke.html
+          docker compose --profile local-uc exec -T marimo-spark \
+            grep -q CI_NOTEBOOK_SMOKE_OK /tmp/ci-smoke.html
+
+      - name: Run native Iceberg smoke notebook
+        run: |
+          docker compose --profile local-uc exec -T marimo-iceberg \
+            marimo export html \
+            /opt/workspace/marimo-playground/notebooks/iceberg/ci-smoke-iceberg.py \
+            --output /tmp/ci-smoke-iceberg.html
+          docker compose --profile local-uc exec -T marimo-iceberg \
+            grep -q CI_ICEBERG_SMOKE_OK /tmp/ci-smoke-iceberg.html
+
+      - name: Show service logs
+        if: failure()
+        run: |
+          docker compose --profile local-uc ps
+          docker compose --profile local-uc logs --no-color
+
+      - name: Tear down local stack
+        if: always()
+        run: just uc=local down-volumes

@@ -1,13 +1,9 @@
-FROM apache/spark:4.2.0-java21-python3
-
-ARG PYSPARK_VERSION=4.2.0
-ARG DELTA_SPARK_VERSION=4.4.0
-ARG MARIMO_VERSION=0.23.16
+FROM apache/spark:4.2.0-java21-python3@sha256:fc64959c04bd87b0ac686be9aaa9008b69cdb1afc695400528279c8b01f43d89
 
 # Optional pre-release override: filename of a locally-staged wheel under
 # spark/delta-override/ (e.g. delta_spark-4.4.0-py3-none-any.whl). Stage it with
-# `just stage-delta <path>` and set DELTA_SPARK_WHEEL in .env. When blank the
-# image installs delta-spark==${DELTA_SPARK_VERSION} from PyPI as usual.
+# `just stage-delta <path>` and set DELTA_SPARK_WHEEL in .env. When set, this
+# replaces the locked public delta-spark package after the environment installs.
 ARG DELTA_SPARK_WHEEL=""
 
 USER root
@@ -21,20 +17,15 @@ ENV PIP_INDEX_URL=${PYPI_PROXY_URL:-https://pypi.org/simple/}
 
 # Staged wheels (git-ignored; usually just .gitkeep unless overriding delta-spark).
 COPY spark/delta-override/ /tmp/delta-override/
+COPY marimo-playground/requirements.lock /tmp/requirements.lock
 
 RUN set -eux; \
+    pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock; \
     if [ -n "${DELTA_SPARK_WHEEL}" ]; then \
         echo "Overriding delta-spark with local wheel: ${DELTA_SPARK_WHEEL}"; \
-        delta_pkg="/tmp/delta-override/${DELTA_SPARK_WHEEL}"; \
-    else \
-        echo "Installing delta-spark==${DELTA_SPARK_VERSION} from PyPI"; \
-        delta_pkg="delta-spark==${DELTA_SPARK_VERSION}"; \
-    fi; \
-    pip install --no-cache-dir \
-        "${delta_pkg}" \
-        "marimo[recommended]>=${MARIMO_VERSION}" \
-        "numpy>=2.2.6" \
-        "pyspark==${PYSPARK_VERSION}"
+        pip install --no-cache-dir --no-deps --force-reinstall \
+            "/tmp/delta-override/${DELTA_SPARK_WHEEL}"; \
+    fi
 
 WORKDIR /opt/workspace
 

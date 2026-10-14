@@ -55,15 +55,34 @@ just sync
 # equivalent: cd marimo-playground && uv sync && just clean-lock
 ```
 
+#### Dependency groups and lock files
+
+`marimo-playground/pyproject.toml` declares one dependency group per notebook
+image, marked as conflicting so one `uv.lock` holds both Spark lines:
+
+| Group | Contents | Exported to | Installed by |
+| --- | --- | --- | --- |
+| `delta` (default) | `pyspark==4.2.0`, `delta-spark==4.4.0` | `requirements.lock` | `Dockerfile` (`marimo-spark`) |
+| `iceberg` | `pyspark==4.1.3`, `pyiceberg[...]==0.12.0` | `requirements-iceberg.lock` | `Dockerfile.iceberg` (`marimo-iceberg`) |
+
+The images install the exported files with `pip --require-hashes` against
+public PyPI (or `PYPI_PROXY_URL`). They contain only versions and hashes, so
+they don't depend on which index produced `uv.lock`. After editing
+`pyproject.toml`, run **`just lock`**: it re-locks through the proxy, cleans
+`uv.lock`, and re-exports both requirements files. Keep `pyspark` in each group
+on the same line as that image's base (`apache/spark:4.2.0` / `4.1.3`).
+
 #### Keep `uv.lock` on public PyPI
 
 uv writes the proxy from `~/.config/uv/uv.toml` into every URL in
-`marimo-playground/uv.lock`, and GitHub runners can't reach that proxy. It also
-re-locks against the proxy on every `uv sync` / `uv run`. So **whenever
-`uv.lock` is modified, run `just clean-lock`** (then `just check-lock`) before
-finishing or committing. The project skill `.cursor/skills/clean-uv-lock/`
-has the details. `just sync` / `edit` / `run` / `edit-iceberg` already clean it
-and launch marimo with `uv run --frozen`; a bare `uv run` re-dirties the lock.
+`marimo-playground/uv.lock`, so the lock only installs where that proxy is
+reachable. It also re-locks against the proxy on every `uv sync` / `uv run`. So
+**whenever `uv.lock` is modified, run `just clean-lock`** (then
+`just check-lock`) before finishing or committing. The project skill
+`.cursor/skills/clean-uv-lock/` has the details. `just sync` / `sync-iceberg` /
+`edit` / `run` / `edit-iceberg` already clean it and launch marimo with
+`uv run --frozen`; a bare `uv run` re-dirties the lock. CI runs
+`just check-lock`, which also fails if either requirements file is stale.
 
 ### Maven — use `MAVEN_PROXY_URL`
 
@@ -298,11 +317,13 @@ Python **3.10+**, Java **21** (see `marimo-playground/.python-version` and
 `.java-version`).
 
 ```bash
-just sync          # uv sync in marimo-playground/ (uses ~/.config/uv/uv.toml) + clean-lock
+just sync          # uv sync the `delta` group (uses ~/.config/uv/uv.toml) + clean-lock
+just sync-iceberg  # uv sync the `iceberg` group instead + clean-lock
 just edit          # sync, then marimo edit notebooks/unitycatalog-delta.py
 just run           # sync, then marimo run (read-only app)
+just lock          # after editing pyproject.toml: uv lock + clean-lock + export both requirements files
 just clean-lock    # rewrite proxy URLs in uv.lock to public PyPI
-just check-lock    # fail if uv.lock still references a private index
+just check-lock    # fail if uv.lock references a private index or a requirements file is stale
 ```
 
 Or from `marimo-playground/`, after `just sync` (`--frozen` keeps uv.lock clean):
@@ -316,8 +337,9 @@ For a local `uv` run, point `UC_SERVER_URL` at a reachable UC (typically
 `http://localhost:8080`) and export `MAVEN_PROXY_URL` so Spark jar resolution
 uses the corporate Maven proxy.
 
-The Iceberg notebooks run locally too (`pyproject.toml` pins `pyspark==4.1.1`
-and includes PyIceberg). Against `uc=local`, also export
+The Iceberg notebooks run locally too, from the `iceberg` dependency group
+(`pyspark==4.1.3` + PyIceberg). `just edit-iceberg` swaps the venv to that group
+(and `just edit` swaps it back). Against `uc=local`, also export
 `S3_ENDPOINT_URL=http://localhost:9000`:
 
 ```bash
@@ -329,8 +351,9 @@ UC_SERVER_URL=http://localhost:8080 S3_ENDPOINT_URL=http://localhost:9000 just e
 ```
 Justfile                         # task runner — start here
 docker-compose.yaml              # marimo-spark + marimo-iceberg + optional unitycatalog + postgres + rustfs (+init) (profile local-uc)
-Dockerfile                       # apache/spark 4.2 + marimo + pyspark + delta-spark (:2718)
-Dockerfile.iceberg               # apache/spark 4.1.3 + marimo + pyspark + pyiceberg (:2719)
+Dockerfile                       # apache/spark 4.2 (digest-pinned) + requirements.lock (:2718)
+Dockerfile.iceberg               # apache/spark 4.1.3 (digest-pinned) + requirements-iceberg.lock (:2719)
+.github/workflows/local-stack.yml  # CI: check-lock, build both images, uc=local up, run both smoke notebooks
 .env.example                     # PYPI_PROXY_URL, MAVEN_PROXY_URL, SPARK/ICEBERG_VERSION, UC_*, POSTGRES_*, HOST_IVY_DIR, RUSTFS_*/S3_*
 etc/conf/server.properties       # bundled UC 0.7 server template (managed Delta + Iceberg; s3:// storage-root, @S3_*@ placeholders)
 etc/conf/hibernate.properties    # local UC → Postgres JDBC (uc=local)
@@ -344,9 +367,12 @@ docs/uc/getting-started.md       # walkthrough: no-auth vs auth modes, demo pers
 docs/uc/authentication.md        # why UC auth matters, how tokens/grants work here, the auth recipes
 docs/releases/delta-4.4.0-release.md  # Delta Lake 4.4.0 release notes (companion to delta-new-in-4.4.0.py)
 marimo-playground/
-  pyproject.toml / uv.lock
+  pyproject.toml / uv.lock       # `delta` + `iceberg` dependency groups (see "Dependency groups")
+  requirements.lock              # `delta` group export (hashes) installed by Dockerfile
+  requirements-iceberg.lock      # `iceberg` group export (hashes) installed by Dockerfile.iceberg
   notebooks/
     unitycatalog-delta.py        # default entrypoint (catalog-managed tables)
+    ci-smoke.py                  # CI: create/write/count/drop a catalog-managed Delta table
     delta-new-in-4.4.0.py        # Delta 4.4.0: identity columns, SHOW PARTITIONS
     metric-views.py              # UC metric views over a catalog-managed Delta table (ecomm catalog)
     common.py                    # shared Spark/UC/Ivy config (ivy_config, spark_config, initialize) + Delta DDL helpers
@@ -355,6 +381,7 @@ marimo-playground/
       iceberg_common.py          # IRC URI, UC REST helpers, Spark + PyIceberg catalog config
       unitycatalog-iceberg-spark.py  # Spark SQL: namespaces, managed/external, DML, evolution, rename
       unitycatalog-pyiceberg.py      # PyIceberg: create, append, scan, schema evolution, rename
+      ci-smoke-iceberg.py        # CI: Spark create/insert -> PyIceberg read/append -> Spark count/drop
     databricks/external-access-unitycatalog-delta-managed-read.py
 delta/scala/catalog-managed.scala
 ```
@@ -365,6 +392,26 @@ on port **2718**; `marimo-iceberg` opens the `notebooks/iceberg/` directory on
 containers. The bundled UC server listens on **8080** when `uc=local`, with
 Postgres on **5432** (metadata volume `uc_postgres_data`) and RustFS on **9000**
 (S3 API) / **9001** (console), backed by the `rustfs_data` volume.
+
+## CI (`.github/workflows/local-stack.yml`)
+
+Runs on every pull request and on pushes to `main`, against public PyPI and
+Maven Central (no proxies):
+
+1. `just check-lock`: `uv.lock` has no private index URLs, and
+   `requirements.lock` / `requirements-iceberg.lock` match `uv.lock`.
+2. `just uc=local build`, then `just uc=local up-detached`; waits for UC (:8080),
+   `marimo-spark` (:2718) and `marimo-iceberg` (:2719).
+3. `marimo export html` runs `notebooks/ci-smoke.py` in `marimo-spark` (prints
+   `CI_NOTEBOOK_SMOKE_OK`) and `notebooks/iceberg/ci-smoke-iceberg.py` in
+   `marimo-iceberg` (prints `CI_ICEBERG_SMOKE_OK`); each step greps for its marker.
+
+Run the same smoke tests locally after `just uc=local start`:
+
+```bash
+docker exec marimo-spark marimo export html /opt/workspace/marimo-playground/notebooks/ci-smoke.py -o /tmp/s.html
+docker exec marimo-iceberg marimo export html /opt/workspace/marimo-playground/notebooks/iceberg/ci-smoke-iceberg.py -o /tmp/i.html
+```
 
 ## Exploring the notebooks
 
@@ -437,9 +484,9 @@ catalog-relative target (`schema.table`); cross-namespace rename is unsupported.
   `ICEBERG_VERSION` and the `marimo-iceberg` Spark line (4.1) in step with
   published `iceberg-spark-runtime-<spark>_2.13` artifacts.
 - When adding Python dependencies, edit `marimo-playground/pyproject.toml` and
-  run `just sync` (registry from `~/.config/uv/uv.toml`; cleans `uv.lock`
-  afterwards). Never commit a `uv.lock` that fails `just check-lock`. Mirror new runtime
-  deps in the `Dockerfile` (or `Dockerfile.iceberg`) `pip install` list if the
-  image needs them too.
+  put them in the right group (`[project] dependencies` for both images,
+  `delta` or `iceberg` for one), then run `just lock` (registry from
+  `~/.config/uv/uv.toml`; cleans `uv.lock` and re-exports the requirements
+  files the images install). Never commit lock files that fail `just check-lock`.
 - When adding Spark / Maven coordinates, resolve them through
   `MAVEN_PROXY_URL`.
