@@ -29,6 +29,11 @@ compose := "docker compose " + compose_profile
 s3_endpoint_url := if uc == "local" { "http://rustfs:9000" } else { "" }
 s3_endpoint_env := if s3_endpoint_url != "" { "S3_ENDPOINT_URL=" + s3_endpoint_url } else { "" }
 
+# Bundled-UC auth mode for `set-auth` (uc=local): "enable" or "disable", e.g.
+# `just uc=local auth=enable set-auth`. Saved to .env as UC_AUTHORIZATION, which
+# rustfs-init renders into server.properties on every `up`.
+auth := ""
+
 # External docker network marimo-spark joins so it can also reach a UC server
 # running in a separate compose project. `just net` creates it idempotently.
 shared_network := "uc-shared"
@@ -44,17 +49,13 @@ pypi_proxy_url := ""
 # The compose service that hosts the marimo notebook UI.
 marimo_service := "marimo-spark"
 
+# Spark 4.1 + Iceberg + PyIceberg notebook service (UC 0.7 native Iceberg), on :2719.
+iceberg_service := "marimo-iceberg"
+iceberg_image := "marimo-iceberg"
+
 # Directory containing the marimo project (local, non-docker workflow).
 notebook_dir := "marimo-playground"
 
-# Host directory where pre-downloaded Spark jars land (bind-mounted to /spark/jars).
-jars_dir := "spark/jars"
-
-# Maven coordinates pre-downloaded by `just jars` to speed up notebook startup.
-# Keep these in sync with the `spark.jars.packages` used in the notebooks.
-
-# uncomment this to copy the public uc jars
-jars_packages := "io.delta:delta-spark_4.2_2.13:4.4.0,io.unitycatalog:unitycatalog-spark_4.2_2.13:0.6.0,org.apache.hadoop:hadoop-aws:3.4.2,software.amazon.awssdk:bundle:2.29.52"
 # ---- Meta -------------------------------------------------------------------
 
 # Show all available recipes (default when running bare `just`).
@@ -68,8 +69,8 @@ alias help := default
 # Build the image and bring the whole environment up (foreground).
 up-all: build up
 
-# Build the image, bring the environment up detached, then print the marimo URL + token.
-start: build up-detached url
+# Build the images, bring the environment up detached, then print both marimo URLs + tokens.
+start: build up-detached url url-iceberg
 
 # ---- Environment file -------------------------------------------------------
 
@@ -81,7 +82,7 @@ init:
 # ---- Docker image -----------------------------------------------------------
 
 # Override the proxy ad-hoc with: just --set pypi_proxy_url https://.../simple build
-# Build the marimo-spark image via compose (auto-loads .env for PYPI_PROXY_URL).
+# Build the marimo-spark + marimo-iceberg images via compose.
 build: init
     {{ if pypi_proxy_url != "" { "PYPI_PROXY_URL=" + pypi_proxy_url } else { "" } }} {{compose}} build
 
@@ -107,45 +108,6 @@ stage-delta wheel:
     echo "Staged spark/delta-override/${name}"
     echo "Now set in .env:  DELTA_SPARK_WHEEL=${name}"
     echo "Then rebuild:     just rebuild"
-
-# ---- Spark jars -------------------------------------------------------------
-
-# Resolution runs inside the marimo-spark image via spark-submit (Ivy). When
-# MAVEN_PROXY_URL is set (from .env) it renders spark/ivysettings.xml into a
-# proxy-first resolver, so Ivy skips the firewalled repo1.maven.org /
-# spark-packages defaults and pulls releases from the proxy; artifacts the proxy
-# lacks (e.g. locally `sbt publishLocal`-ed delta-spark / unitycatalog-spark
-# builds) fall through to the mounted host Ivy repo at /opt/ivy2/local — the same
-# repo the notebooks resolve from (SPARK_JARS_IVY=/opt/ivy2). Downloaded jars are
-# still staged under /tmp/ivy so only THIS run's set is copied to ./spark/jars.
-# ./spark is bind-mounted to /spark (see docker-compose.yaml). Re-runnable:
-# existing jars are not re-copied, and it requires the image — run `just build`
-# first if needed.
-# Pre-download notebook jars (+ transitive deps) into ./spark/jars for fast startup.
-jars: init net
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mkdir -p {{jars_dir}}
-    {{compose}} run --rm --no-deps -T --entrypoint bash {{marimo_service}} -lc '
-        set -euo pipefail
-        ivy_args="--conf spark.jars.ivy=/tmp/ivy"
-        if [ -n "${MAVEN_PROXY_URL:-}" ]; then
-            sed -e "s#@MAVEN_PROXY_URL@#${MAVEN_PROXY_URL}#g" \
-                -e "s#@IVY_LOCAL_ROOT@#/opt/ivy2/local#g" \
-                /spark/ivysettings.xml > /tmp/ivysettings.xml
-            ivy_args="$ivy_args --conf spark.jars.ivySettings=/tmp/ivysettings.xml"
-            echo "Using proxy-first Ivy resolver: ${MAVEN_PROXY_URL}"
-        fi
-        printf "pass\n" > /tmp/noop.py
-        "$SPARK_HOME"/bin/spark-submit \
-            --packages "{{jars_packages}}" \
-            $ivy_args \
-            /tmp/noop.py
-        cp -vn /tmp/ivy/jars/*.jar /spark/jars/
-    '
-    echo ""
-    echo "Pre-downloaded jars now in {{jars_dir}}/ :"
-    ls -1 {{jars_dir}}/*.jar 2>/dev/null | sed "s#^#  #" || echo "  (none found)"
 
 # ---- Environment (docker compose) -------------------------------------------
 
@@ -178,19 +140,23 @@ logs:
 logs-marimo:
     {{compose}} logs -f {{marimo_service}}
 
-# Print the marimo notebook URL + access token (waits for the container to boot).
-url:
+# Follow logs for just the Spark 4.1 / Iceberg marimo service.
+logs-iceberg:
+    {{compose}} logs -f {{iceberg_service}}
+
+# Print a marimo notebook URL + access token (waits for the container to boot).
+url service=marimo_service port="2718":
     #!/usr/bin/env bash
     set -euo pipefail
     for _ in $(seq 1 30); do
-        line=$({{compose}} logs {{marimo_service}} 2>/dev/null \
-            | grep -oE 'http://[0-9.]+:2718[^[:space:]]*access_token=[A-Za-z0-9_-]+' \
+        line=$({{compose}} logs {{service}} 2>/dev/null \
+            | grep -oE 'http://[0-9.]+:{{port}}[^[:space:]]*access_token=[A-Za-z0-9_-]+' \
             | tail -n1 || true)
         if [ -n "${line}" ]; then
             token=$(printf '%s' "${line}" | sed -E 's/.*access_token=//')
             localhost_url=$(printf '%s' "${line}" | sed -E 's#http://[0-9.]+:#http://localhost:#')
             echo ""
-            echo "marimo is ready — open it in your browser:"
+            echo "marimo ({{service}}) is ready — open it in your browser:"
             echo "  ${localhost_url}"
             echo ""
             echo "  access token: ${token}"
@@ -198,7 +164,10 @@ url:
         fi
         sleep 1
     done
-    echo "No marimo URL found yet — the container may still be starting. Try: just url   (or: just logs-marimo)"
+    echo "No marimo URL found yet for {{service}} — it may still be starting. Try: just url {{service}} {{port}}   (or: {{compose}} logs {{service}})"
+
+# Print the Iceberg notebook (marimo-iceberg, :2719) URL + access token.
+url-iceberg: (url iceberg_service "2719")
 
 # Log in to the console with RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY
 # (defaults: rustfsadmin / rustfsadmin).
@@ -211,12 +180,127 @@ rustfs-url:
 # credential errors. uc=local only; the STS lifetime defaults to 12h
 # (STS_DURATION_SECONDS in .env). The bucket + its data are left untouched.
 # Re-mint the RustFS STS credential UC vends to Spark, then restart UC to load it.
-rotate-creds:
-    {{s3_endpoint_env}} {{compose}} up -d --force-recreate --no-deps rustfs-init
-    {{compose}} restart unitycatalog
+rotate-creds: _reload-uc
+
+# Run once on a uc_postgres_data volume created by UC 0.6 (new volumes don't
+# need it): hbm2ddl=update never alters existing columns, so property values
+# longer than 255 chars fail until uc_properties.property_value is widened.
+# Widen uc_properties.property_value for UC 0.7 (uc=local, existing Postgres volume).
+db-upgrade:
+    {{compose}} exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "ALTER TABLE uc_properties ALTER COLUMN property_value TYPE text;"'
 
 # Restart the environment (down + up detached).
 restart: down up-detached
+
+# Waits for rustfs-init to exit before the restart, so UC never starts against a
+# half-rendered server.properties.
+# Re-render the uc_conf volume (fresh STS creds + UC_AUTHORIZATION), then restart UC.
+_reload-uc:
+    {{s3_endpoint_env}} {{compose}} up -d --force-recreate --no-deps rustfs-init
+    @test "$(docker wait rustfs-init)" = 0 || { echo "rustfs-init failed; see: docker logs rustfs-init" >&2; exit 1; }
+    {{compose}} restart unitycatalog
+
+# ---- Authentication (uc=local) ----------------------------------------------
+# See docs/uc/authentication.md for why these matter and how UC auth works.
+
+# Fail fast when a recipe that manages the bundled UC is run without uc=local.
+_require-local:
+    #!/usr/bin/env bash
+    if [ "{{uc}}" != "local" ]; then
+        echo "This recipe manages the bundled Unity Catalog; run it with uc=local (e.g. just uc=local demo-auth)." >&2
+        exit 1
+    fi
+
+# Persist the bundled-UC auth mode as UC_AUTHORIZATION in .env.
+_save-auth mode: init
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{mode}}" in
+        enable|disable) ;;
+        *) echo "auth must be 'enable' or 'disable' (got '{{mode}}'), e.g. just uc=local auth=enable set-auth" >&2; exit 2 ;;
+    esac
+    if grep -q '^UC_AUTHORIZATION=' .env; then
+        sed -i.bak 's/^UC_AUTHORIZATION=.*/UC_AUTHORIZATION={{mode}}/' .env && rm -f .env.bak
+    else
+        printf '\nUC_AUTHORIZATION=%s\n' "{{mode}}" >> .env
+    fi
+    echo "Saved UC_AUTHORIZATION={{mode}} in .env."
+
+# A stopped stack needs nothing here: the next `up` renders the saved mode.
+# Re-render + restart UC only if it is already running.
+_reload-uc-if-running:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "$(docker ps -q --filter name='^unitycatalog$' --filter status=running)" ]; then
+        {{just_executable()}} uc={{uc}} _reload-uc
+    fi
+
+# Block until the UC REST API answers: HTTP 200 with auth off, 401 with auth on.
+_wait-uc:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    base="${UC_SERVER:-http://localhost:8080}"
+    printf 'Waiting for Unity Catalog at %s ' "$base"
+    for _ in $(seq 1 60); do
+        code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "$base/api/2.1/unity-catalog/catalogs" || true)"
+        case "$code" in
+            200) echo " ready, auth disabled (unauthenticated requests get 200)."; exit 0 ;;
+            401) echo " ready, auth enabled (unauthenticated requests get 401)."; exit 0 ;;
+        esac
+        printf '.'
+        sleep 2
+    done
+    echo
+    echo "Unity Catalog did not answer within 120s. Check: just uc=local logs" >&2
+    exit 1
+
+# Build, start the bundled UC with auth disabled (open, no tokens), and print the marimo URLs.
+demo-noauth: _require-local (_save-auth "disable") build _reload-uc-if-running up-detached _wait-uc url url-iceberg
+
+# Build, start the bundled UC with auth enabled, seed the demo personas, and print the admin token + marimo URLs.
+demo-auth: _require-local (_save-auth "enable") build _reload-uc-if-running up-detached _wait-uc bootstrap-users url url-iceberg
+    @echo ""
+    @echo "Admin token (metastore OWNER, never expires). Persona tokens: just uc=local token-for <email>"
+    @{{just_executable()}} token
+
+# Usage: just uc=local auth=enable set-auth   (or auth=disable). Saved to .env so
+# later `up` / `restart` keep it. UC reads server.properties only at startup, so
+# a running server is re-rendered and restarted; a stopped stack picks the mode
+# up on the next `just uc=local up`.
+# Turn bundled-UC auth on or off without a rebuild (saves to .env, restarts UC).
+set-auth: _require-local (_save-auth auth)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "$(docker ps -q --filter name='^unitycatalog$' --filter status=running)" ]; then
+        echo "unitycatalog is not running; the new mode applies on the next: just uc=local up-detached"
+        exit 0
+    fi
+    {{just_executable()}} uc={{uc}} _reload-uc _wait-uc
+
+# Same identity as etc/conf/token.txt inside the container. UC re-signs it on
+# every start, but the signing key persists in the uc_conf volume, so old copies
+# keep working until `just down-volumes` / `just clean`.
+# Print the admin token UC self-signs at startup (metastore OWNER, no expiry).
+token:
+    @bash -c 'source scripts/_uc_lib.sh && uc_require_container && uc_admin_token' && echo
+
+# Usage: just uc=local token-for scott@uc-demos.dev   (EXP_DAYS=7 shortens the 30-day default)
+# Mint a bearer token for a UC user, signed with the server's own key (no identity provider needed).
+token-for email:
+    @scripts/mint-user-token.sh "{{email}}"
+
+# Idempotent: existing users and grants are left in place.
+# Seed the demo personas (power-user, scott, jules, lisa, robert) and their grants on demo.workshop.
+bootstrap-users:
+    @scripts/bootstrap-users.sh
+
+# Usage: just uc=local grant grant  -t schema -n demo.workshop -p robert@uc-demos.dev -P SELECT
+#        just uc=local grant revoke -t schema -n demo.workshop -p robert@uc-demos.dev -P SELECT
+#        just uc=local grant --help
+# Grant or revoke a Unity Catalog privilege for a user (runs as the admin token).
+[positional-arguments]
+grant *args:
+    @scripts/grant.sh "$@"
 
 # ---- Teardown ---------------------------------------------------------------
 
@@ -239,20 +323,70 @@ alias stop := down
 down-volumes:
     {{compose}} down --volumes
 
-# Wipe volumes and remove the locally built marimo-spark image.
+# Wipe volumes and remove the locally built marimo-spark / marimo-iceberg images.
 clean: down-volumes
     -docker image rm {{image}}:{{tag}}
+    -docker image rm {{iceberg_image}}:{{tag}}
 
 # ---- Local notebook workflow (uv, no docker) --------------------------------
+#
+# pyproject.toml has one dependency group per notebook image: `delta` (default,
+# Spark 4.2) and `iceberg` (Spark 4.1 + PyIceberg). They conflict, so the venv
+# holds one at a time; switching between them re-syncs pyspark.
+#
+# Behind a PyPI proxy, uv re-locks on every sync and writes the proxy's URLs
+# into uv.lock; clean-lock points them back at public PyPI for CI. --frozen
+# keeps `uv run` from re-locking (and re-dirtying uv.lock) after a sync.
 
-# Install the marimo project's Python dependencies with uv.
+iceberg_group := "--no-default-groups --group iceberg"
+export_flags  := "--frozen --format requirements-txt --no-emit-project --no-default-groups"
+
+# Install the Delta (Spark 4.2) dependencies with uv, then clean uv.lock.
 sync:
     cd {{notebook_dir}} && uv sync
+    @{{just_executable()}} clean-lock
+
+# Install the Iceberg (Spark 4.1 + PyIceberg) dependencies with uv, then clean uv.lock.
+sync-iceberg:
+    cd {{notebook_dir}} && uv sync {{iceberg_group}}
+    @{{just_executable()}} clean-lock
+
+# Re-lock after editing pyproject.toml, clean uv.lock, and re-export both image requirements files.
+lock:
+    cd {{notebook_dir}} && uv lock
+    @{{just_executable()}} clean-lock
+    cd {{notebook_dir}} && uv export {{export_flags}} --group delta --output-file requirements.lock
+    cd {{notebook_dir}} && uv export {{export_flags}} --group iceberg --output-file requirements-iceberg.lock
+
+# Rewrite private PyPI proxy URLs in uv.lock to public PyPI (idempotent).
+clean-lock:
+    @scripts/clean-uv-lock.py
+
+# Fail if uv.lock references a private index or the image requirements files are stale (CI guard).
+check-lock:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/clean-uv-lock.py --check
+    cd {{notebook_dir}}
+    stale=0
+    for pair in delta:requirements.lock iceberg:requirements-iceberg.lock; do
+        group="${pair%%:*}" file="${pair#*:}"
+        if ! diff -u <(grep -v '^ *#' "$file") \
+                     <(uv export {{export_flags}} --group "$group" | grep -v '^ *#') >/dev/null; then
+            echo "$file is out of date with uv.lock; run \`just lock\`" >&2
+            stale=1
+        fi
+    done
+    exit "$stale"
 
 # Open the Unity Catalog notebook locally in edit mode.
-edit:
-    cd {{notebook_dir}} && uv run marimo edit notebooks/unitycatalog-delta.py
+edit: sync
+    cd {{notebook_dir}} && uv run --frozen marimo edit notebooks/unitycatalog-delta.py
 
 # Run the Unity Catalog notebook locally as a read-only app.
-run:
-    cd {{notebook_dir}} && uv run marimo run notebooks/unitycatalog-delta.py
+run: sync
+    cd {{notebook_dir}} && uv run --frozen marimo run notebooks/unitycatalog-delta.py
+
+# Open the native Iceberg notebooks locally (Spark 4.1 + PyIceberg).
+edit-iceberg: sync-iceberg
+    cd {{notebook_dir}} && SPARK_VERSION=4.1 uv run --frozen {{iceberg_group}} marimo edit notebooks/iceberg/

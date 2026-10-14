@@ -17,7 +17,7 @@ jobs:
   smoke-test:
     name: Build and smoke test
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       SPARK_DRIVER_CORES: "2"
       SPARK_DRIVER_MEMORY: 3g
@@ -29,13 +29,19 @@ jobs:
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
       - name: Validate configuration
         run: |
           docker compose version
           docker compose --profile local-uc config --quiet
           just --list >/dev/null
 
-      - name: Build marimo-spark image
+      - name: Check dependency locks
+        run: just check-lock
+
+      - name: Build marimo-spark and marimo-iceberg images
         run: just uc=local build
 
       - name: Start local Unity Catalog stack
@@ -51,6 +57,10 @@ jobs:
             --retry 45 --retry-delay 2 --retry-all-errors \
             http://localhost:2718 \
             >/dev/null
+          curl --fail --silent --show-error \
+            --retry 45 --retry-delay 2 --retry-all-errors \
+            http://localhost:2719 \
+            >/dev/null
 
       - name: Run managed-table smoke notebook
         run: |
@@ -60,6 +70,15 @@ jobs:
             --output /tmp/ci-smoke.html
           docker compose --profile local-uc exec -T marimo-spark \
             grep -q CI_NOTEBOOK_SMOKE_OK /tmp/ci-smoke.html
+
+      - name: Run native Iceberg smoke notebook
+        run: |
+          docker compose --profile local-uc exec -T marimo-iceberg \
+            marimo export html \
+            /opt/workspace/marimo-playground/notebooks/iceberg/ci-smoke-iceberg.py \
+            --output /tmp/ci-smoke-iceberg.html
+          docker compose --profile local-uc exec -T marimo-iceberg \
+            grep -q CI_ICEBERG_SMOKE_OK /tmp/ci-smoke-iceberg.html
 
       - name: Show service logs
         if: failure()

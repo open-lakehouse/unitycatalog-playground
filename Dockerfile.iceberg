@@ -1,0 +1,29 @@
+# marimo + Spark 4.1 + PyIceberg image for the native Iceberg (Iceberg REST
+# catalog) notebooks in marimo-playground/notebooks/iceberg/.
+#
+# Spark 4.1 rather than the 4.2 used by the main Dockerfile: Apache Iceberg
+# publishes iceberg-spark-runtime only for Spark 4.0 / 4.1, and UC 0.7's Iceberg
+# REST catalog is tested end-to-end against Spark 4.0/4.1 + Iceberg 1.11.
+FROM apache/spark:4.1.3-java21-python3@sha256:bf9d035a7c32a8ca46aa58d6348182ffd7d2dff6409206ecfbb3915ff1fef211
+
+USER root
+
+# Optional pip index URL override, e.g. for building behind a corporate PyPI
+# proxy: --build-arg PYPI_PROXY_URL=https://pypi-proxy.your-company.com/simple/
+ARG PYPI_PROXY_URL=""
+ENV PYPI_PROXY_URL=${PYPI_PROXY_URL}
+ENV PIP_INDEX_URL=${PYPI_PROXY_URL:-https://pypi.org/simple/}
+
+# Exported from uv.lock's `iceberg` dependency group (pyspark must match the
+# base image's Spark 4.1.3); regenerate with `just lock`.
+COPY marimo-playground/requirements-iceberg.lock /tmp/requirements.lock
+
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock
+
+WORKDIR /opt/workspace
+
+COPY marimo-playground/notebooks/ ./marimo-playground/notebooks/
+
+EXPOSE 2719
+
+ENTRYPOINT ["marimo", "edit", "--host", "0.0.0.0", "--port", "2719", "marimo-playground/notebooks/iceberg/"]
