@@ -3,7 +3,8 @@
 Guidance for coding agents working in this repository.
 
 This repo is a **Unity Catalog OSS playground**: a Dockerized (or local `uv`)
-marimo + Spark notebook environment for exploring catalog-managed Delta tables.
+marimo + Spark notebook environment for exploring catalog-managed Delta tables
+and (UC 0.7+) native Apache Iceberg tables through UC's Iceberg REST catalog.
 
 Prefer the `just` recipes in the root `Justfile` over raw `docker compose`
 commands. Run `just` (or `just help`) to list them.
@@ -14,7 +15,7 @@ commands. Run `just` (or `just help`) to list them.
 - [`just`](https://github.com/casey/just)
 - [`uv`](https://docs.astral.sh/uv/) for the local (non-Docker) notebook workflow
 - The external Docker network `uc-shared` (created automatically by `just net`,
-  `just up`, `just up-detached`, and `just jars`)
+  `just up`, and `just up-detached`)
 
 ## Corporate network: Python and Maven
 
@@ -51,21 +52,31 @@ Local notebook deps:
 
 ```bash
 just sync
-# equivalent: cd marimo-playground && uv sync
+# equivalent: cd marimo-playground && uv sync && just clean-lock
 ```
+
+#### Keep `uv.lock` on public PyPI
+
+uv writes the proxy from `~/.config/uv/uv.toml` into every URL in
+`marimo-playground/uv.lock`, and GitHub runners can't reach that proxy. It also
+re-locks against the proxy on every `uv sync` / `uv run`. So **whenever
+`uv.lock` is modified, run `just clean-lock`** (then `just check-lock`) before
+finishing or committing. The project skill `.cursor/skills/clean-uv-lock/`
+has the details. `just sync` / `edit` / `run` / `edit-iceberg` already clean it
+and launch marimo with `uv run --frozen`; a bare `uv run` re-dirties the lock.
 
 ### Maven — use `MAVEN_PROXY_URL`
 
-For **any** Maven / Ivy / Spark jar resolution (`just jars`, `spark-submit
---packages`, notebook `spark.jars.packages`, publishing or fetching artifacts):
+For **any** Maven / Ivy / Spark jar resolution (`spark-submit --packages`,
+notebook `spark.jars.packages`, publishing or fetching artifacts):
 
 1. Use the `MAVEN_PROXY_URL` environment variable as the Maven repository root.
    Typical value: `https://maven-proxy.dev.databricks.com` (append a Nexus
    group path if required, e.g. `.../repository/.../`).
 2. Never resolve against `repo1.maven.org` or `spark-packages` first when
    `MAVEN_PROXY_URL` is set — those hosts are firewalled and stall Ivy.
-3. Compose, the notebooks, and `just jars` all read **`MAVEN_PROXY_URL`**.
-   `just jars` renders `spark/ivysettings.xml` into a **proxy-first** Ivy
+3. Compose and the notebooks read **`MAVEN_PROXY_URL`**.
+   `common.ivy_config()` renders `spark/ivysettings.xml` into a **proxy-first** Ivy
    resolver so artifacts go straight to the proxy, with the local Ivy repo
    (`~/.ivy2/local`, or `/opt/ivy2/local` in the container) used only for
    SNAPSHOTs the proxy does not have.
@@ -82,9 +93,13 @@ Then edit `.env`:
 
 | Variable | Purpose |
 | --- | --- |
-| `PYPI_PROXY_URL` | PyPI index used when **building** the `marimo-spark` image. Set from `~/.config/uv/uv.toml`. |
-| `MAVEN_PROXY_URL` | Maven2 root used at **run time** by Spark / `just jars`. |
+| `PYPI_PROXY_URL` | PyPI index used when **building** the `marimo-spark` and `marimo-iceberg` images. Set from `~/.config/uv/uv.toml`. |
+| `MAVEN_PROXY_URL` | Maven2 root used at **run time** by Spark jar resolution in the notebooks. |
+| `SPARK_VERSION` | Spark line for `marimo-spark` Maven coordinates (default `4.2`). `marimo-iceberg` pins `4.1`. |
+| `ICEBERG_VERSION` | `iceberg-spark-runtime-4.1_2.13` / `iceberg-aws-bundle` version for `marimo-iceberg` (default `1.11.0`). |
+| `UC_ICEBERG_CATALOG` | UC catalog used as the Iceberg REST `warehouse` + Spark catalog name (default `unity`). |
 | `UC_SERVER_URL` / `UC_SERVER_PORT` / `UC_TOKEN` | Unity Catalog endpoint. Defaults talk to the bundled `unitycatalog` service. |
+| `UC_AUTHORIZATION` | `enable` / `disable` (default). Rendered into the bundled UC's `server.authorization` by `rustfs-init` (`uc=local`). Written by `just uc=local auth=... set-auth` / `demo-auth` / `demo-noauth`. |
 | `POSTGRES_*` | Local UC Postgres (`uc=local`). Keep in sync with `etc/conf/hibernate.properties`. |
 | `HOST_IVY_DIR` | Host Ivy repo bind-mounted into the container (default `~/.ivy2`). |
 | `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` | RustFS root credentials (`uc=local`). Local-only dev defaults (`rustfsadmin`). |
@@ -104,28 +119,44 @@ recipe accepts `uc=remote` (default) or `uc=local`.
 
 | Mode | What starts |
 | --- | --- |
-| `remote` (default) | Only `marimo-spark`. Point it at an external UC via `.env`. |
-| `local` | Bundled `unitycatalog` + Postgres metadata DB + `rustfs` object store (+ `rustfs-init` bootstrap) **plus** `marimo-spark`. |
+| `remote` (default) | `marimo-spark` + `marimo-iceberg`. Point them at an external UC via `.env`. |
+| `local` | Bundled `unitycatalog` (official `unitycatalog/unitycatalog:v0.7.0`, digest-pinned) + Postgres metadata DB + `rustfs` object store (+ `rustfs-init` bootstrap) **plus** both marimo services. |
+
+Two notebook services run side by side:
+
+| Service | Image | Port | Notebooks |
+| --- | --- | --- | --- |
+| `marimo-spark` | `Dockerfile` (Spark 4.2, Delta) | **2718** | `notebooks/*.py` (Delta, metric views) |
+| `marimo-iceberg` | `Dockerfile.iceberg` (Spark 4.1.3, Iceberg 1.11, PyIceberg 0.12) | **2719** | `notebooks/iceberg/` |
 
 ```bash
-just build                 # build marimo-spark (honors PYPI_PROXY_URL)
+just build                 # build marimo-spark + marimo-iceberg
 just rebuild               # no-cache rebuild
-just jars                  # optional: pre-download Spark jars into ./spark/jars
 just up                    # remote UC, foreground
 just uc=local up           # bundled local UC + marimo, foreground
-just uc=local start        # build + up -d + print the marimo URL/token
-just url                   # print http://localhost:2718?access_token=...
-just logs / just logs-marimo
+just uc=local start        # build + up -d + print both marimo URLs/tokens
+just url                   # print http://localhost:2718?access_token=... (marimo-spark)
+just url-iceberg           # print http://localhost:2719?access_token=... (marimo-iceberg)
+just logs / just logs-marimo / just logs-iceberg
 just ps
 just down                  # stop containers/networks; keep named volumes (alias: just stop)
 just down-volumes          # down + delete named volumes (wipes local UC Postgres + RustFS data)
-just clean                 # down-volumes + delete the local marimo-spark image
+just clean                 # down-volumes + delete the local marimo images
 just uc=local rotate-creds # re-mint the RustFS STS credential UC vends + restart UC (after ~12h)
 just uc=local rustfs-url   # print the RustFS console + S3 API URLs
+just uc=local db-upgrade   # once, on a uc_postgres_data volume created by UC 0.6
+just uc=local demo-noauth  # build + start with auth disabled + print URLs
+just uc=local demo-auth    # build + start with auth enabled + seed demo users + print admin token/URLs
+just uc=local auth=enable set-auth   # flip auth (saved to .env, re-renders uc_conf, restarts UC)
+just uc=local token        # print the admin (metastore OWNER) token
+just uc=local token-for <email>      # mint a token for a UC user (scripts/mint-user-token.sh)
+just uc=local bootstrap-users        # seed demo users + grants on demo.workshop (idempotent)
+just uc=local grant <grant|revoke> -t <type> -n <name> -p <principal> -P <privilege>
 ```
 
 `just start` is the usual happy path: build, start detached, print the notebook
-URL. Open the printed `http://localhost:2718?access_token=...` URL in a browser.
+URLs. Open the printed `http://localhost:2718?access_token=...` (Delta) or
+`http://localhost:2719?access_token=...` (Iceberg) URL in a browser.
 
 Pass the **same** `uc=...` value to `down` / `logs` / `ps` that you used to
 start the stack.
@@ -138,6 +169,11 @@ image/credentials as upstream `etc/db/postgres-example.yml`). Config lives in
 classpath. Data is in the named volume `uc_postgres_data` and survives
 `just down` / restarts — use `just clean` or `just down-volumes` to wipe it.
 
+Upgrading a volume created by UC 0.6: Hibernate's `hbm2ddl=update` adds new
+tables/columns but never widens existing ones, and 0.7 stores Iceberg/namespace
+properties longer than 255 chars in `uc_properties.property_value`. Run
+`just uc=local db-upgrade` once (or `just clean` to start fresh).
+
 ### Local UC storage (RustFS)
 
 With `uc=local`, managed table DATA lives in **RustFS** (an S3-compatible object
@@ -149,8 +185,8 @@ stack behaves like a cloud UC. On startup the one-shot `rustfs-init` service:
 3. renders `etc/conf` into the `uc_conf` volume, injecting the bucket/region and
    those creds into `server.properties`.
 
-Why STS: this UC build (`newfrontdocker/unitycatalog:v0.6.0`) has **no custom S3
-endpoint support** (that's the still-open unitycatalog PR #1636). Its credential
+Why STS: this UC build (`unitycatalog/unitycatalog:v0.7.0`) has **no
+custom S3 endpoint support** (that's the still-open unitycatalog PR #1636). Its credential
 vendor returns static creds to Spark only when a **session token** is present,
 else it falls back to AWS STS (unreachable). RustFS — like MinIO — rejects a
 token it didn't issue, so `rustfs-init` mints a real RustFS STS token for UC to
@@ -163,6 +199,44 @@ untouched). Object data is in the `rustfs_data` volume; `uc_conf` is regenerated
 each `up`. The notebooks set the client-side `fs.s3a.endpoint` / path-style /
 plaintext toggles from `S3_ENDPOINT_URL` (injected as `http://rustfs:9000` by
 `just uc=local`); UC still vends the credentials.
+
+UC 0.7 also does **server-side** S3 I/O: the Iceberg REST catalog writes each
+table's first `metadata.json`, and the storage-cleanup worker deletes dropped
+managed tables. With no endpoint property, the server reaches RustFS through
+the AWS SDK's `AWS_ENDPOINT_URL_S3=http://rustfs:9000` env var. The SDK then
+uses virtual-hosted addressing (`uc-warehouse.rustfs`), so Compose gives
+`rustfs` `RUSTFS_SERVER_DOMAINS=rustfs` and a `<bucket>.rustfs` network alias.
+
+Dropped **managed** tables are not deleted inline: UC queues a row in
+`uc_storage_cleanup_tasks` and a background worker deletes the storage after
+`server.storage-cleanup.initial-delay` (upstream default `P7D`; the template
+uses `PT5M` so the playground reclaims space quickly). The worker processes
+one task per `poll-interval` (`PT1M`). External tables are never deleted.
+
+### Local UC authentication
+
+`server.authorization` comes from `UC_AUTHORIZATION` in `.env` (default
+`disable`): `rustfs-init` renders it into `server.properties` on every `up`, and
+UC reads it only at startup. Change it with `just uc=local auth=enable|disable
+set-auth` (or `demo-auth` / `demo-noauth`), never by editing the rendered file.
+Those recipes re-render `uc_conf` and restart UC when it's running.
+
+UC accepts only its own `internal`-issuer RS512 JWTs on API requests, signed
+with the key it keeps in `uc_conf` (`private_key.der`, `key_id.txt`), for an
+**enabled** UC user. `token.txt` is the `admin` service token (metastore OWNER,
+no expiry). `scripts/mint-user-token.sh` signs user tokens with the same key, so
+no identity provider is needed; `server.allowed-issuers` / `server.audiences`
+only apply to external-IdP token exchange at `POST /auth/tokens` and stay blank.
+`scripts/` (`_uc_lib.sh`, `bootstrap-users.sh`, `grant.sh`) read the key and
+admin token out of the running `unitycatalog` container and need `jq`,
+`openssl`, `curl`, `uuidgen`.
+
+Objects created while auth was disabled have no owner and no hierarchy links in
+`casbin_rule`, so even `admin` needs explicit grants on them; the `demo` catalog
+from `bootstrap-users` is created with auth on. `down-volumes` / `clean`
+regenerate the signing key and wipe users, so re-run `demo-auth`. See
+`docs/uc/authentication.md` (why + recipes) and `docs/uc/getting-started.md`
+(walkthrough).
 
 #### Troubleshooting: `403 Forbidden` / `AccessDeniedException` on managed tables
 
@@ -204,28 +278,19 @@ marimo kernel and re-run from the `common.initialize(...)` cell, or
 
 ### Network
 
-`marimo-spark` joins the **external** Docker network `uc-shared`. Compose fails
+`marimo-spark` and `marimo-iceberg` join the **external** Docker network `uc-shared`. Compose fails
 with `network uc-shared declared as external, but could not be found` if it is
-missing. `just up` / `just up-detached` / `just jars` create it via `just net`.
+missing. `just up` / `just up-detached` create it via `just net`.
 
-### Pre-downloaded Spark jars
+### Spark jar resolution
 
-Notebooks resolve `delta-spark`, `unitycatalog-spark`, `hadoop-aws`, and
-transitive deps from Maven on first Spark session unless `./spark/jars` is
-populated. That can take minutes behind a firewall.
-
-```bash
-just build
-just jars          # uses MAVEN_PROXY_URL / ivysettings.xml; safe to re-run
-just uc=local start
-```
-
-Coordinates live in `jars_packages` at the top of the `Justfile`. Keep them in
-sync with `spark.jars.packages` in the notebooks. Downloaded jars are
-git-ignored (`spark/jars/.gitkeep` keeps the directory).
-
-`delta_4.3_playground` prefers `/spark/jars` and falls back to Maven when empty.
-Its first cell prints `Jar source: local (...)` vs `Jar source: Maven (...)`.
+Notebooks resolve their Spark packages from Maven on the first Spark session:
+`delta-spark`, `unitycatalog-spark`, and `hadoop-aws` for `marimo-spark`
+(`common.spark_config()`), and `iceberg-spark-runtime-4.1_2.13` +
+`iceberg-aws-bundle` for `marimo-iceberg` (`iceberg_common.iceberg_spark_config()`).
+Both go through the proxy-first Ivy settings (`common.ivy_config()`), and the
+host `~/.ivy2` bind mount caches the artifacts after the first session. The
+first resolution can take minutes behind a firewall.
 
 ## Local notebooks (no Docker)
 
@@ -233,51 +298,71 @@ Python **3.10+**, Java **21** (see `marimo-playground/.python-version` and
 `.java-version`).
 
 ```bash
-just sync          # uv sync in marimo-playground/ (uses ~/.config/uv/uv.toml)
-just edit          # marimo edit notebooks/unitycatalog-delta.py
-just run           # marimo run (read-only app)
+just sync          # uv sync in marimo-playground/ (uses ~/.config/uv/uv.toml) + clean-lock
+just edit          # sync, then marimo edit notebooks/unitycatalog-delta.py
+just run           # sync, then marimo run (read-only app)
+just clean-lock    # rewrite proxy URLs in uv.lock to public PyPI
+just check-lock    # fail if uv.lock still references a private index
 ```
 
-Or from `marimo-playground/`:
+Or from `marimo-playground/`, after `just sync` (`--frozen` keeps uv.lock clean):
 
 ```bash
-uv sync
-uv run marimo edit notebooks/unitycatalog-delta.py
-uv run marimo edit notebooks/my_new_notebook.py
+uv run --frozen marimo edit notebooks/unitycatalog-delta.py
+uv run --frozen marimo edit notebooks/my_new_notebook.py
 ```
 
 For a local `uv` run, point `UC_SERVER_URL` at a reachable UC (typically
 `http://localhost:8080`) and export `MAVEN_PROXY_URL` so Spark jar resolution
 uses the corporate Maven proxy.
 
+The Iceberg notebooks run locally too (`pyproject.toml` pins `pyspark==4.1.1`
+and includes PyIceberg). Against `uc=local`, also export
+`S3_ENDPOINT_URL=http://localhost:9000`:
+
+```bash
+UC_SERVER_URL=http://localhost:8080 S3_ENDPOINT_URL=http://localhost:9000 just edit-iceberg
+```
+
 ## Project layout
 
 ```
 Justfile                         # task runner — start here
-docker-compose.yaml              # marimo-spark + optional unitycatalog + postgres + rustfs (+init) (profile local-uc)
-Dockerfile                       # apache/spark + marimo + pyspark + delta-spark
-.env.example                     # PYPI_PROXY_URL, MAVEN_PROXY_URL, UC_*, POSTGRES_*, HOST_IVY_DIR, RUSTFS_*/S3_*
-etc/conf/server.properties       # bundled UC server template (managed tables; s3:// storage-root, @S3_*@ placeholders)
+docker-compose.yaml              # marimo-spark + marimo-iceberg + optional unitycatalog + postgres + rustfs (+init) (profile local-uc)
+Dockerfile                       # apache/spark 4.2 + marimo + pyspark + delta-spark (:2718)
+Dockerfile.iceberg               # apache/spark 4.1.3 + marimo + pyspark + pyiceberg (:2719)
+.env.example                     # PYPI_PROXY_URL, MAVEN_PROXY_URL, SPARK/ICEBERG_VERSION, UC_*, POSTGRES_*, HOST_IVY_DIR, RUSTFS_*/S3_*
+etc/conf/server.properties       # bundled UC 0.7 server template (managed Delta + Iceberg; s3:// storage-root, @S3_*@ placeholders)
 etc/conf/hibernate.properties    # local UC → Postgres JDBC (uc=local)
 etc/conf/*.log4j2.properties     # UC server/CLI logging (copied into the uc_conf volume by rustfs-init)
-etc/rustfs/bootstrap.sh          # rustfs-init: create bucket + mint STS creds + render server.properties
+etc/rustfs/bootstrap.sh          # rustfs-init: create bucket + mint STS creds + render server.properties (incl. UC_AUTHORIZATION)
+scripts/                         # uc=local auth tooling (mint-user-token.sh, bootstrap-users.sh, grant.sh, _uc_lib.sh) + clean-uv-lock.py
+.cursor/skills/clean-uv-lock/    # agent skill: clean uv.lock whenever it changes
 spark/ivysettings.xml            # proxy-first Ivy template (@MAVEN_PROXY_URL@)
-spark/jars/                      # pre-downloaded jars from `just jars` (git-ignored)
+spark/delta-override/            # optional local delta-spark wheel from `just stage-delta` (git-ignored)
+docs/uc/getting-started.md       # walkthrough: no-auth vs auth modes, demo personas, live grants
+docs/uc/authentication.md        # why UC auth matters, how tokens/grants work here, the auth recipes
+docs/releases/delta-4.4.0-release.md  # Delta Lake 4.4.0 release notes (companion to delta-new-in-4.4.0.py)
 marimo-playground/
   pyproject.toml / uv.lock
   notebooks/
     unitycatalog-delta.py        # default entrypoint (catalog-managed tables)
-    unitycatalog-0.5-delta.py
-    delta_4.2_enhancements.py
-    delta_4.3_playground.py      # prefers /spark/jars
+    delta-new-in-4.4.0.py        # Delta 4.4.0: identity columns, SHOW PARTITIONS
+    metric-views.py              # UC metric views over a catalog-managed Delta table (ecomm catalog)
+    common.py                    # shared Spark/UC/Ivy config (ivy_config, spark_config, initialize) + Delta DDL helpers
+    sanctuary.py                 # shared seeded pet roster + adoptions (stdlib only) used by every notebook
+    iceberg/                     # served by marimo-iceberg (:2719)
+      iceberg_common.py          # IRC URI, UC REST helpers, Spark + PyIceberg catalog config
+      unitycatalog-iceberg-spark.py  # Spark SQL: namespaces, managed/external, DML, evolution, rename
+      unitycatalog-pyiceberg.py      # PyIceberg: create, append, scan, schema evolution, rename
     databricks/external-access-unitycatalog-delta-managed-read.py
-delta/python/catalog-managed.py  # Pets helpers used by the notebooks
 delta/scala/catalog-managed.scala
 ```
 
-The Docker image entrypoint opens `marimo-playground/notebooks/unitycatalog-delta.py`
-on port **2718**. Notebooks are bind-mounted, so host edits appear in the
-container. The bundled UC server listens on **8080** when `uc=local`, with
+The `marimo-spark` entrypoint opens `marimo-playground/notebooks/unitycatalog-delta.py`
+on port **2718**; `marimo-iceberg` opens the `notebooks/iceberg/` directory on
+**2719**. Notebooks are bind-mounted, so host edits appear in both
+containers. The bundled UC server listens on **8080** when `uc=local`, with
 Postgres on **5432** (metadata volume `uc_postgres_data`) and RustFS on **9000**
 (S3 API) / **9001** (console), backed by the `rustfs_data` volume.
 
@@ -286,25 +371,75 @@ Postgres on **5432** (metadata volume `uc_postgres_data`) and RustFS on **9000**
 1. Start the stack (`just uc=local start`) and open the printed marimo URL.
 2. Run cells **in order**. Skip markdown cells; they are context only.
 3. The default notebook walks through creating a catalog-managed Delta table
-   (`unity.sanctuary.pets`) using helpers in `delta/python/catalog-managed.py`:
-   `Pets`, `generate_pets`, `pets_to_dataframe`, `create_table_ddl`,
-   `create_table_using_sql`.
-4. Spark sessions honor `MAVEN_PROXY_URL` / `spark/ivysettings.xml` and, when
-   present, jars in `/spark/jars`.
+   (`unity.sanctuary.pets`) using `sanctuary.generate_pets` /
+   `sanctuary.pets_to_dataframe` and `common.create_table_ddl` /
+   `common.create_table_using_sql`.
+
+### Shared data (`notebooks/sanctuary.py`)
+
+All notebooks (Delta and Iceberg) generate data from `sanctuary.py`, a seeded,
+deterministic, prefix-stable pet roster (`roster(100)` is the first 100 of
+`roster(120)`). Pet `uuid`s are identical in every table, so Delta
+`unity.sanctuary.pets.uuid` joins Iceberg `unity.iceberg_spark.adoptions.pet_uuid`
+and `unity.iceberg_py.pets.uuid`. Keep it stdlib-only at import time (the
+PyIceberg notebook has no Spark), keep `PET_COLUMNS` matching the Delta table,
+and don't change `SEED` / `AS_OF` / the draw order casually: that changes every
+generated row, so existing tables stop lining up with fresh runs. Notebooks
+write the roster idempotently (overwrite / `CREATE OR REPLACE` first), so
+reruns don't duplicate `uuid`s.
+4. Spark sessions honor `MAVEN_PROXY_URL` / `spark/ivysettings.xml`.
+
+### Native Iceberg notebooks (UC 0.7, `marimo-iceberg` on :2719)
+
+UC 0.7 serves an Iceberg REST catalog at
+`<UC_SERVER_URL>/api/2.1/unity-catalog/iceberg`. The client `warehouse` is the UC
+catalog name (`unity`, override with `UC_ICEBERG_CATALOG`), Iceberg namespaces are
+UC schemas, and `loadTable` vends short-lived S3 credentials per table.
+`iceberg_common.ensure_catalog()` creates the catalog through the UC REST API
+when it is missing (fresh `uc_postgres_data` volume).
+
+- `unitycatalog-iceberg-spark.py` (`unity.iceberg_spark`): `/v1/config` handshake,
+  namespace properties, partitioned managed table, append / UPDATE / DELETE /
+  MERGE, snapshots + time travel, schema and partition evolution, CTAS + rename,
+  and an external table with `LOCATION`.
+- `unitycatalog-pyiceberg.py` (`unity.iceberg_py`): the same catalog from PyIceberg
+  with no JVM: create with an explicit schema/spec, append/overwrite, filtered
+  scans, schema evolution, row-level delete, `inspect.*`, time travel, rename.
+
+Both are idempotent (safe to re-run) and end with a **disabled** teardown cell.
+To verify headless: `docker exec -w /opt/workspace/marimo-playground/notebooks/iceberg marimo-iceberg python3 <notebook>.py`.
+
+Upstream 0.7.0 issues the notebooks work around (remove each one once it's
+fixed upstream):
+
+| Issue | Workaround |
+| --- | --- |
+| `loadTable` sends `client.refresh-credentials-endpoint` without `s3.session-token-expires-at-ms` when the vended token has no expiry, so Iceberg Java fails with `Invalid S3 Credentials` | `iceberg_common` sets `client.refresh-credentials-enabled=false` when `S3_ENDPOINT_URL` is set (PyIceberg is unaffected) |
+| `loadTable` on a missing namespace returns `NoSuchNamespaceException`, not `NoSuchTableException`, so Spark metadata tables (`t.snapshots`, `t.files`, ...) don't resolve | Spark notebook uses `system.ancestors_of` and the `_file` / `_partition` / `_spec_id` metadata columns; PyIceberg's `inspect.*` works |
+
+Expected noise: a `RESTMetricsReporter: Failed to report metrics` WARN in the
+container log after the CTAS + rename cell. Spark reports scan metrics for the
+pre-rename name and UC correctly returns 404. Spark `RENAME TO` takes a
+catalog-relative target (`schema.table`); cross-namespace rename is unsupported.
 
 ## Agent conventions
 
 - Use `just` recipes; do not invent parallel Compose invocations unless a
   recipe is missing.
-- Do not commit `.env`, `spark/jars/*.jar`, or secrets (`UC_TOKEN`, AWS keys
+- Do not commit `.env`, `spark/delta-override/*.whl`, or secrets (`UC_TOKEN`, AWS keys
   in `server.properties`). `etc/conf/server.properties` is a **template** with
   `@S3_*@` placeholders; the rendered copy with live creds lives only in the
   `uc_conf` volume (never on disk) — leave the placeholders in the committed file.
 - Do not add `--remove-orphans` to `docker compose down` from recipes — it can
   delete a UC server started by another Compose project on the shared network.
-- Keep `Justfile` `jars_packages` aligned with notebook `spark.jars.packages`.
+- Delta / UC Spark coordinates live in `common.spark_config()`.
+  Iceberg coordinates live in `iceberg_common.iceberg_spark_config()`; keep
+  `ICEBERG_VERSION` and the `marimo-iceberg` Spark line (4.1) in step with
+  published `iceberg-spark-runtime-<spark>_2.13` artifacts.
 - When adding Python dependencies, edit `marimo-playground/pyproject.toml` and
-  run `uv sync` (registry from `~/.config/uv/uv.toml`). Mirror new runtime
-  deps in the `Dockerfile` `pip install` list if the image needs them too.
+  run `just sync` (registry from `~/.config/uv/uv.toml`; cleans `uv.lock`
+  afterwards). Never commit a `uv.lock` that fails `just check-lock`. Mirror new runtime
+  deps in the `Dockerfile` (or `Dockerfile.iceberg`) `pip install` list if the
+  image needs them too.
 - When adding Spark / Maven coordinates, resolve them through
   `MAVEN_PROXY_URL`.

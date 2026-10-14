@@ -5,7 +5,8 @@
 #   2. create the UC storage bucket if it does not exist
 #   3. mint a short-lived STS credential (AssumeRole) from RustFS
 #   4. render etc/conf into the shared `uc_conf` volume, injecting the bucket /
-#      region into server.properties and appending the freshly-minted creds
+#      region / server.authorization mode into server.properties and appending
+#      the freshly-minted creds
 #
 # Why STS instead of the static root key: UC's v0.6 credential vendor
 # (AwsCredentialVendor) only returns static credentials verbatim to Spark when a
@@ -24,14 +25,24 @@ ENDPOINT="${RUSTFS_ENDPOINT:-http://rustfs:9000}"
 BUCKET="${UC_STORAGE_BUCKET:-uc-warehouse}"
 REGION="${S3_REGION:-us-east-1}"
 DURATION="${STS_DURATION_SECONDS:-43200}"
+# server.authorization for UC (`just uc=local auth=enable|disable set-auth`).
+AUTHORIZATION="${UC_AUTHORIZATION:-disable}"
+
+log() { echo "[rustfs-init] $*"; }
+
+case "$AUTHORIZATION" in
+  enable|disable) ;;
+  *)
+    log "ERROR: UC_AUTHORIZATION must be 'enable' or 'disable', got '${AUTHORIZATION}'" >&2
+    exit 1
+    ;;
+esac
 
 # Sign S3/STS calls to RustFS with the long-term root key (required to call
 # AssumeRole — temporary creds and service accounts cannot).
 export AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY:-rustfsadmin}"
 export AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY:-rustfsadmin}"
 export AWS_DEFAULT_REGION="$REGION"
-
-log() { echo "[rustfs-init] $*"; }
 
 log "waiting for RustFS at ${ENDPOINT} ..."
 i=0
@@ -84,6 +95,7 @@ done
 sed \
   -e "s|@S3_BUCKET@|${BUCKET}|g" \
   -e "s|@S3_REGION@|${REGION}|g" \
+  -e "s|^server\.authorization=.*|server.authorization=${AUTHORIZATION}|" \
   /templates/server.properties > /conf/server.properties
 
 {
@@ -93,4 +105,4 @@ sed \
   printf 's3.sessionToken.0=%s\n' "$st"
 } >> /conf/server.properties
 
-log "done. UC storage-root -> s3://${BUCKET} (creds valid for ~${DURATION}s)"
+log "done. UC storage-root -> s3://${BUCKET} (creds valid for ~${DURATION}s), server.authorization=${AUTHORIZATION}"

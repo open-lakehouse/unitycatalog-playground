@@ -39,6 +39,7 @@ __all__ = [
     "create_table_ddl",
     "create_table_using_sql",
     "initialize",
+    "ivy_config",
     "spark_config",
     "unity_catalog_server_url",
     "unity_catalog_token",
@@ -128,6 +129,36 @@ def _render_ivy_settings(proxy: str, ivy_dir: str | None) -> str | None:
     return str(out)
 
 
+def ivy_config() -> dict[str, str]:
+    """Spark settings that point jar resolution at the local Ivy repo / Maven proxy."""
+    config: dict[str, str] = {}
+
+    # When running inside the docker container, the host's local Ivy repository is
+    # bind-mounted (see docker-compose.yaml) and SPARK_JARS_IVY is set to /opt/ivy2.
+    # Pointing Spark at it makes any locally published unitycatalog-spark SNAPSHOT
+    # resolvable from `${SPARK_JARS_IVY}/local`. Running locally (`just run`/uv)
+    # leaves SPARK_JARS_IVY unset, so Spark uses the default ~/.ivy2 on your laptop.
+    ivy_dir = os.environ.get("SPARK_JARS_IVY")
+    if ivy_dir:
+        config["spark.jars.ivy"] = ivy_dir
+
+    if MAVEN_PROXY_URL:
+        # Behind the firewall, resolve everything through a proxy-first Ivy
+        # resolver (spark/ivysettings.xml) instead of Spark's default
+        # `spark.jars.repositories`, which only APPENDS the proxy and so probes
+        # the unreachable repo1.maven.org / spark-packages first (the "Connection
+        # refused" noise) and can let a locally published delta-spark shadow the
+        # release. _render_ivy_settings renders the template; on miss it falls
+        # back to the old append behaviour so resolution still works.
+        rendered = _render_ivy_settings(MAVEN_PROXY_URL, ivy_dir)
+        if rendered:
+            config["spark.jars.ivySettings"] = rendered
+        else:
+            config["spark.jars.repositories"] = MAVEN_PROXY_URL
+
+    return config
+
+
 def spark_config(
     catalog: str = CATALOG,
     server_url: str | None = None,
@@ -170,28 +201,7 @@ def spark_config(
         config["spark.hadoop.fs.s3a.path.style.access"] = "true"
         config["spark.hadoop.fs.s3a.connection.ssl.enabled"] = "false"
 
-    # When running inside the docker container, the host's local Ivy repository is
-    # bind-mounted (see docker-compose.yaml) and SPARK_JARS_IVY is set to /opt/ivy2.
-    # Pointing Spark at it makes any locally published unitycatalog-spark SNAPSHOT
-    # resolvable from `${SPARK_JARS_IVY}/local`. Running locally (`just run`/uv)
-    # leaves SPARK_JARS_IVY unset, so Spark uses the default ~/.ivy2 on your laptop.
-    ivy_dir = os.environ.get("SPARK_JARS_IVY")
-    if ivy_dir:
-        config["spark.jars.ivy"] = ivy_dir
-
-    if MAVEN_PROXY_URL:
-        # Behind the firewall, resolve everything through a proxy-first Ivy
-        # resolver (spark/ivysettings.xml) instead of Spark's default
-        # `spark.jars.repositories`, which only APPENDS the proxy and so probes
-        # the unreachable repo1.maven.org / spark-packages first (the "Connection
-        # refused" noise) and can let a locally published delta-spark shadow the
-        # release. _render_ivy_settings renders the template; on miss it falls
-        # back to the old append behaviour so resolution still works.
-        rendered = _render_ivy_settings(MAVEN_PROXY_URL, ivy_dir)
-        if rendered:
-            config["spark.jars.ivySettings"] = rendered
-        else:
-            config["spark.jars.repositories"] = MAVEN_PROXY_URL
+    config.update(ivy_config())
 
     if extra:
         config.update(extra)

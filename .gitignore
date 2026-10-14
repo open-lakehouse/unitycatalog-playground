@@ -201,6 +201,9 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# coding agent
+.isaac/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
@@ -212,12 +215,11 @@ derby.log
 *.checkpoint
 spark-warehouse/
 
-# Pre-downloaded Spark jars (populated by `just jars`); keep the dir via .gitkeep
-spark/jars/*
-!spark/jars/.gitkeep
-
 # Local delta-spark override wheel for pre-release testing (kept via .gitkeep)
 spark/delta-override/*
 !spark/delta-override/.gitkeep
 
 .DS_Store
+
+# ignore local neon settings
+.neon 

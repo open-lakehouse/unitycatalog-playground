@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Ivy settings template used whenever a MAVEN_PROXY_URL is configured — by both
-  `just jars` (spark-submit pre-download) and the marimo notebooks (which point
-  `spark.jars.ivySettings` at a rendered copy of this file).
+  Ivy settings template used whenever a MAVEN_PROXY_URL is configured — the
+  marimo notebooks point `spark.jars.ivySettings` at a rendered copy of this
+  file (common.ivy_config()).
 
   Why this exists
   ===============
@@ -34,8 +34,8 @@
   =========================================
     @MAVEN_PROXY_URL@      -> the MAVEN_PROXY_URL value (Maven2 root URL).
     @IVY_LOCAL_ROOT@   -> absolute path to the local Ivy repo's `local` dir
-                          (e.g. /opt/ivy2/local in the container, /tmp/ivy/local
-                          for `just jars`). Passed explicitly rather than relying
+                          (e.g. /opt/ivy2/local in the container, ~/.ivy2/local
+                          for a local `uv` run). Passed explicitly rather than relying
                           on ${ivy.default.ivy.user.dir}, which Spark only sets
                           AFTER loading this file.
 -->

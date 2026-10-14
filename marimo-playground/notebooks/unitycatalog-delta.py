@@ -23,11 +23,8 @@ def _(mo):
 def _():
     import marimo as mo
 
-    from pyspark.sql import SparkSession, DataFrame
-    from pyspark.sql.types import (
-        StructType, StructField, 
-        StringType, IntegerType, BooleanType
-    )
+    from pyspark.sql import SparkSession
+    from pyspark.sql import functions as F
 
     # notebooks/common.py owns the environment setup shared by every notebook
     # here: artifact versions and the Unity Catalog endpoint come from the
@@ -35,21 +32,13 @@ def _():
     # local Ivy repo, S3A/RustFS switches) and builds the session.
     import common
 
+    # notebooks/sanctuary.py generates the pet roster shared with the Iceberg
+    # notebooks, so the same pets (same uuids) appear in every table.
+    import sanctuary
+
     catalog = common.CATALOG
     spark: SparkSession = common.initialize(app_name="DeltaCatalogManagedTables")
-    return (
-        BooleanType,
-        DataFrame,
-        IntegerType,
-        SparkSession,
-        StringType,
-        StructField,
-        StructType,
-        catalog,
-        common,
-        mo,
-        spark,
-    )
+    return F, SparkSession, catalog, common, mo, sanctuary, spark
 
 
 @app.cell(disabled=True, hide_code=True)
@@ -135,82 +124,12 @@ def _(spark: "SparkSession"):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## Next we'll create some helpers to make it easy to work with our `Pets`
-    This includes data generators, and helper methods for creating data to work with in this notebook.
+    ## Our `Pets` come from the shared sanctuary roster
+    The `Pets` record and its generators live in `notebooks/sanctuary.py`, which the Iceberg notebooks use too. The roster is seeded, so every notebook gets the same pets with the same `uuid`s, and this Delta table can later be joined with the Iceberg tables built from the same roster.
+
+    A `Pets` record also carries `species`, `shelter` and `intake_at`. This table stores the `uuid`, `name`, `age` and `adopted` columns (`sanctuary.PET_COLUMNS`), which `sanctuary.pets_to_dataframe` selects.
     """)
     return
-
-
-@app.cell
-def _(
-    BooleanType,
-    DataFrame,
-    IntegerType,
-    SparkSession,
-    StringType,
-    StructField,
-    StructType,
-):
-    import uuid
-    import random
-    from dataclasses import dataclass, fields
-    from typing import Iterator
-
-    # 1. Pets dataclass
-    @dataclass
-    class Pets:
-        uuid: str
-        name: str
-        age: int
-        adopted: bool
-
-    def generate_pets(batch_size: int = 10, total: int = 100) -> Iterator[list[Pets]]:
-        names = [
-            "Luna", "Milo", "Bella", "Charlie", "Max",
-            "Lucy", "Cooper", "Daisy", "Buddy", "Lily",
-            "Rocky", "Molly", "Bear", "Lola", "Duke",
-            "Sadie", "Tucker", "Zoe", "Oliver", "Stella",
-            "Archie", "Rosie", "Leo", "Cleo", "Finn",
-            "Nova", "Jasper", "Willow", "Atlas", "Ivy",
-            "Theo", "Ruby", "Gus", "Nala", "Remy",
-            "Pepper", "Beau", "Coco", "Arlo", "Hazel",
-            "Scout", "Freya", "Hugo", "Maple", "Rufus",
-            "Juniper", "Otis", "Penny", "Bentley", "Sage",
-            "Winston", "Piper", "Clover", "Dexter", "Wren",
-            "Biscuit", "Tilly", "Monty", "Fern", "Chester",
-            "Poppy", "Bruno", "Skye", "Ziggy", "Opal",
-            "Roux", "Nimbus", "Dottie", "Cosmo", "Waffles",
-        ]
-        pets = [
-            Pets(
-                uuid=str(uuid.uuid4()),
-                name=random.choice(names),
-                age=random.randint(1, 15),
-                adopted=random.choice([True, False]),
-            )
-            for _ in range(total)
-        ]
-        for i in range(0, len(pets), batch_size):
-            yield pets[i : i + batch_size]
-
-    def pets_to_dataframe(pets: list[Pets], spark: SparkSession) -> DataFrame:
-        """
-        given a list of pets, create a dataframe
-        """
-        rows = [
-            (p.uuid, p.name, p.age, p.adopted)
-            for p in pets
-        ]
-        schema = StructType([
-            StructField("uuid",    StringType(),  nullable=False),
-            StructField("name",    StringType(),  nullable=False),
-            StructField("age",     IntegerType(), nullable=False),
-            StructField("adopted", BooleanType(), nullable=False),
-        ])
-        return spark.createDataFrame(rows, schema=schema)
-
-
-    return generate_pets, pets_to_dataframe
 
 
 @app.cell(hide_code=True)
@@ -231,9 +150,9 @@ def _(mo):
 
 
 @app.cell
-def _(generate_pets):
-    # create 100 pets across 10 batches
-    pets = generate_pets(batch_size=10, total=100)
+def _(sanctuary):
+    # the 100-pet roster across 10 batches
+    pets = sanctuary.generate_pets(batch_size=10, total=100)
     return (pets,)
 
 
@@ -245,8 +164,8 @@ def _(pets):
 
 
 @app.cell
-def _(create_table_ddl, litter_one, pets_to_dataframe, spark: "SparkSession"):
-    df = pets_to_dataframe(litter_one, spark)
+def _(common, litter_one, sanctuary, spark: "SparkSession"):
+    df = sanctuary.pets_to_dataframe(litter_one, spark)
     pets_schema = df.schema
     props = {'delta.feature.catalogManaged': 'supported'}
 
@@ -279,23 +198,17 @@ def _(mo):
 
 
 @app.cell
-def _(
-    create_table_using_sql,
-    pets_schema,
-    props,
-    spark: "SparkSession",
-    uc_schema,
-    uc_table,
-):
+def _(common, pets_schema, props, spark: "SparkSession", uc_schema, uc_table):
     # we will create the new table
     res = common.create_table_using_sql(f"{uc_schema}.{uc_table}", pets_schema, props, spark)
     return
 
 
 @app.cell
-def _(df, uc_schema, uc_table):
-    # Now let's insert some batches
-    df.write.format("delta").mode("append").saveAsTable(f"{uc_schema}.{uc_table}")
+def _(F, df, uc_schema, uc_table):
+    # Now let's insert some batches. The first one overwrites, so re-running
+    # the notebook starts again from the same 100 pets instead of duplicating them.
+    df.writeTo(f"{uc_schema}.{uc_table}").overwrite(F.lit(True))
     return
 
 
@@ -306,9 +219,9 @@ def _(spark: "SparkSession"):
 
 
 @app.cell
-def _(pets, pets_to_dataframe, spark: "SparkSession", uc_schema, uc_table):
+def _(pets, sanctuary, spark: "SparkSession", uc_schema, uc_table):
     for litter in pets:
-        pets_to_dataframe(litter, spark).write.format("delta").mode("append").saveAsTable(f"{uc_schema}.{uc_table}")
+        sanctuary.pets_to_dataframe(litter, spark).write.format("delta").mode("append").saveAsTable(f"{uc_schema}.{uc_table}")
     return
 
 

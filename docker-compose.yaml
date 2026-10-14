@@ -15,10 +15,14 @@ services:
   # path). The server config is rendered into the `uc_conf` volume by the
   # `rustfs-init` one-shot, which injects freshly-minted RustFS S3 credentials
   # into server.properties — hence the depends_on service_completed_successfully.
+  #
+  # Official UC 0.7.0 image (native Iceberg tables via the Iceberg REST catalog),
+  # pinned to the multi-arch index digest so amd64 and arm64 hosts both pull a
+  # native, immutable build. The tag is informational; Docker resolves the digest.
   unitycatalog:
     profiles:
       - local-uc
-    image: unitycatalog/unitycatalog:v0.6.0
+    image: unitycatalog/unitycatalog:v0.7.0@sha256:cdacdc5e7624795e7b2a18ece0d7357c5a1ec640db17fccb4d0fb208dd0d335b
     hostname: unitycatalog
     container_name: unitycatalog
     depends_on:
@@ -26,6 +30,14 @@ services:
         condition: service_healthy
       rustfs-init:
         condition: service_completed_successfully
+    environment:
+      # Since 0.7 the server itself does S3 IO: it writes the first metadata.json
+      # of every native Iceberg table and deletes dropped managed data. UC has
+      # no custom-endpoint setting (unitycatalog PR #1636 was closed unmerged),
+      # so point the AWS SDK's service-specific endpoint at RustFS instead. The
+      # SDK addresses buckets virtual-hosted style (<bucket>.rustfs), which the
+      # `rustfs` service answers via RUSTFS_SERVER_DOMAINS + a network alias.
+      AWS_ENDPOINT_URL_S3: http://rustfs:9000
     ports:
       - "8080:8080"
     volumes:
@@ -54,6 +66,9 @@ services:
       RUSTFS_ADDRESS: 0.0.0.0:9000
       RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
       RUSTFS_CONSOLE_ENABLE: "true"
+      # Accept virtual-hosted-style requests (<bucket>.rustfs:9000) from the UC
+      # server's AWS SDK; path-style requests to rustfs:9000/<bucket> keep working.
+      RUSTFS_SERVER_DOMAINS: rustfs
       # Local dev root credentials. Override in .env for anything exposed.
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
@@ -67,7 +82,11 @@ services:
         source: rustfs_data
         target: /data
     networks:
-      - unity
+      unity:
+        aliases:
+          # Virtual-hosted-style DNS name for the UC storage bucket (see the
+          # AWS_ENDPOINT_URL_S3 note on the unitycatalog service).
+          - ${UC_STORAGE_BUCKET:-uc-warehouse}.rustfs
 
   # One-shot bootstrap for the local S3 stack: waits for RustFS, creates the UC
   # bucket, mints a short-lived STS credential (AssumeRole), and renders the UC
@@ -90,6 +109,9 @@ services:
       UC_STORAGE_BUCKET: ${UC_STORAGE_BUCKET:-uc-warehouse}
       S3_REGION: ${S3_REGION:-us-east-1}
       STS_DURATION_SECONDS: ${STS_DURATION_SECONDS:-43200}
+      # Rendered into server.properties as server.authorization. Persisted in
+      # .env by `just uc=local auth=enable|disable set-auth` (see docs/uc/authentication.md).
+      UC_AUTHORIZATION: ${UC_AUTHORIZATION:-disable}
     volumes:
       - type: bind
         source: ./etc/rustfs/bootstrap.sh
@@ -209,13 +231,10 @@ services:
       - type: bind
         source: ${HOST_IVY_DIR:-${HOME}/.ivy2}
         target: /opt/ivy2
-      # Host ./spark mounted at /spark, providing:
-      #   - /spark/jars: pre-downloaded jars (delta / unitycatalog / hadoop-aws,
-      #     etc). Populate with `just jars` to speed up notebook startup. The
-      #     actual jars are git-ignored; the dir is kept via spark/jars/.gitkeep.
-      #   - /spark/ivysettings.xml: proxy-only Ivy resolver template used by
-      #     `just jars` so resolution skips the firewalled Maven Central /
-      #     spark-packages defaults and goes straight to MAVEN_PROXY_URL.
+      # Host ./spark mounted at /spark for /spark/ivysettings.xml: the proxy-first
+      # Ivy resolver template common.ivy_config() renders when MAVEN_PROXY_URL is
+      # set, so resolution skips the firewalled Maven Central / spark-packages
+      # defaults and goes straight to the proxy.
       - type: bind
         source: ./spark
         target: /spark
@@ -226,7 +245,53 @@ services:
       # Shared external network so marimo-spark can also reach a UC server that
       # lives in a *separate* compose project (which joins the same network).
       # The network must exist first — create it idempotently with `just net`
-      # (the up/jars recipes do this automatically): docker network create uc-shared
+      # (the up recipes do this automatically): docker network create uc-shared
+      - uc-shared
+
+  # Spark 4.1 + Iceberg + PyIceberg notebooks for UC 0.7 native Iceberg tables,
+  # served on :2719 from marimo-playground/notebooks/iceberg/. A separate image
+  # because iceberg-spark-runtime does not exist for Spark 4.2 (marimo-spark).
+  # Environment / mounts mirror marimo-spark; see the comments there.
+  marimo-iceberg:
+    image: marimo-iceberg:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.iceberg
+      args:
+        PYPI_PROXY_URL: ${PYPI_PROXY_URL:-}
+    hostname: marimo-iceberg
+    container_name: marimo-iceberg
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - MAVEN_PROXY_URL
+      - SPARK_JARS_IVY=/opt/ivy2
+      - UC_SERVER_URL=${UC_SERVER_URL:-unitycatalog}
+      - UC_SERVER_PORT=${UC_SERVER_PORT:-8080}
+      - UC_TOKEN=${UC_TOKEN:-}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-}
+      - S3_REGION=${S3_REGION:-us-east-1}
+      # Pinned to the image's Spark line (not ${SPARK_VERSION}, which tracks the
+      # 4.2 marimo-spark image): selects iceberg-spark-runtime-4.1_2.13.
+      - SPARK_VERSION=4.1
+      - ICEBERG_VERSION=${ICEBERG_VERSION:-1.11.0}
+      - UC_ICEBERG_CATALOG=${UC_ICEBERG_CATALOG:-unity}
+      - SPARK_DRIVER_MEMORY=${SPARK_DRIVER_MEMORY:-4g}
+      - SPARK_DRIVER_CORES=${SPARK_DRIVER_CORES:-4}
+    volumes:
+      - type: bind
+        source: ./marimo-playground/notebooks
+        target: /opt/workspace/marimo-playground/notebooks
+      - type: bind
+        source: ${HOST_IVY_DIR:-${HOME}/.ivy2}
+        target: /opt/ivy2
+      - type: bind
+        source: ./spark
+        target: /spark
+    ports:
+      - "2719:2719"
+    networks:
+      - unity
       - uc-shared
 
 networks:
