@@ -31,7 +31,8 @@ def _(mo):
     1. Wire Spark to UC's Iceberg REST catalog and inspect the `/v1/config` handshake.
     2. Create a namespace (= UC schema) and update its properties.
     3. Create a **managed**, hidden-partitioned Iceberg table and load it.
-    4. Row-level `UPDATE` / `DELETE` / `MERGE INTO`, snapshots and time travel.
+    4. Row-level `UPDATE` / `DELETE` / `MERGE INTO`, snapshots, time travel and
+       the `.snapshots` / `.manifests` metadata tables.
     5. Schema and partition evolution, and what UC records about the table.
     6. `CREATE OR REPLACE TABLE ... AS SELECT` (staged create) and `RENAME`.
     7. An **external** Iceberg table at a `LOCATION`.
@@ -337,11 +338,14 @@ def _(mo):
     credentials UC vended.
 
     > **UC 0.7.0:** Iceberg *metadata tables* (`adoptions.snapshots`,
-    > `.files`, `.history`, ...) don't resolve from Spark yet. Iceberg clients
+    > `.manifests`, `.files`, ...) don't resolve from Spark. Iceberg clients
     > first try `loadTable(namespace=iceberg_spark.adoptions, table=snapshots)`
     > and fall back to the metadata table only on `NoSuchTableException`. UC
-    > answers `NoSuchNamespaceException` instead. PyIceberg's `table.inspect`
-    > is unaffected (see the PyIceberg notebook).
+    > 0.7.0 answers `NoSuchNamespaceException` instead. The fix
+    > ([unitycatalog#1984](https://github.com/unitycatalog/unitycatalog/pull/1984))
+    > ships in UC 0.8. `ancestors_of` and the metadata columns below work on
+    > both; the metadata-table cells after them print a note on 0.7.0.
+    > PyIceberg's `table.inspect` is unaffected (see the PyIceberg notebook).
     """)
     return
 
@@ -380,6 +384,78 @@ def _(adoptions_ready, dml_done, spark: "SparkSession"):
     ORDER BY rows DESC
     LIMIT 5
     """).show(truncate=False)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Metadata tables: `.snapshots` and `.manifests`
+
+    From UC 0.8 the same history is queryable as tables, by appending the
+    metadata table name to the table name.
+
+    - `adoptions.snapshots` lists every snapshot still in the table metadata,
+      including the ones `CREATE OR REPLACE` kept from earlier runs, so on a
+      re-run it is longer than the `ancestors_of` lineage above.
+    - `adoptions.manifests` lists the manifest files of the current snapshot.
+      Manifests with `content = 0` track data files; `content = 1` track delete
+      files. Their data-file counts match the distinct `_file` values above.
+    """)
+    return
+
+
+@app.cell
+def _(adoptions_ready, spark: "SparkSession"):
+    def metadata_table(name: str):
+        """`<adoptions>.<name>` as a DataFrame, or None on a UC that can't resolve it (0.7.0)."""
+        try:
+            return spark.table(f"{adoptions_ready}.{name}")
+        except Exception as err:
+            if "NoSuchNamespaceException" not in str(err):
+                raise
+            print(f"{adoptions_ready}.{name} doesn't resolve on UC 0.7.0; see ancestors_of and the metadata columns above.")
+            return None
+
+    return (metadata_table,)
+
+
+@app.cell
+def _(dml_done, metadata_table, snapshots):
+    _ = dml_done
+    _log = metadata_table("snapshots")
+    if _log is not None:
+        _log.selectExpr(
+            "committed_at",
+            "snapshot_id",
+            "parent_id",
+            "operation",
+            "summary['added-records'] AS added_records",
+            "summary['total-records'] AS total_records",
+        ).orderBy("committed_at").show(truncate=False)
+        print(f"{_log.count()} snapshots in the table metadata, {snapshots.count()} in the current lineage")
+    return
+
+
+@app.cell
+def _(adoptions_ready, dml_done, metadata_table, spark: "SparkSession"):
+    _ = dml_done
+    _manifests = metadata_table("manifests")
+    if _manifests is not None:
+        _manifests.selectExpr(
+            "CASE content WHEN 0 THEN 'data' ELSE 'deletes' END AS content",
+            "partition_spec_id AS spec_id",
+            "added_snapshot_id",
+            "added_data_files_count AS added",
+            "existing_data_files_count AS existing",
+            "deleted_data_files_count AS deleted",
+            "element_at(split(path, '/'), -1) AS manifest",
+        ).show(truncate=False)
+        _tracked = _manifests.where("content = 0").selectExpr(
+            "SUM(added_data_files_count + existing_data_files_count) AS n"
+        ).first().n
+        _live = spark.sql(f"SELECT COUNT(DISTINCT _file) AS n FROM {adoptions_ready}").first().n
+        print(f"data files in the current manifests: {_tracked}; files holding rows (_file): {_live}")
     return
 
 

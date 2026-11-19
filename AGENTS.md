@@ -461,8 +461,9 @@ when it is missing (fresh `uc_postgres_data` volume).
 
 - `unitycatalog-iceberg-spark.py` (`unity.iceberg_spark`): `/v1/config` handshake,
   namespace properties, partitioned managed table, append / UPDATE / DELETE /
-  MERGE, snapshots + time travel, schema and partition evolution, CTAS + rename,
-  and an external table with `LOCATION`.
+  MERGE, snapshots + time travel, the `.snapshots` / `.manifests` metadata
+  tables (UC 0.8+), schema and partition evolution, CTAS + rename, and an
+  external table with `LOCATION`.
 - `unitycatalog-pyiceberg.py` (`unity.iceberg_py`): the same catalog from PyIceberg
   with no JVM: create with an explicit schema/spec, append/overwrite, filtered
   scans, schema evolution, row-level delete, `inspect.*`, time travel, rename.
@@ -476,7 +477,7 @@ fixed upstream):
 | Issue | Workaround |
 | --- | --- |
 | `loadTable` sends `client.refresh-credentials-endpoint` without `s3.session-token-expires-at-ms` when the vended token has no expiry, so Iceberg Java fails with `Invalid S3 Credentials` | `iceberg_common` sets `client.refresh-credentials-enabled=false` when `S3_ENDPOINT_URL` is set (PyIceberg is unaffected) |
-| `loadTable` on a missing namespace returns `NoSuchNamespaceException`, not `NoSuchTableException`, so Spark metadata tables (`t.snapshots`, `t.files`, ...) don't resolve | Spark notebook uses `system.ancestors_of` and the `_file` / `_partition` / `_spec_id` metadata columns; PyIceberg's `inspect.*` works |
+| `loadTable` on a missing namespace returns `NoSuchNamespaceException`, not `NoSuchTableException`, so Spark metadata tables (`t.snapshots`, `t.files`, ...) don't resolve. Fixed for 0.8 ([unitycatalog#1984](https://github.com/unitycatalog/unitycatalog/pull/1984)) | Spark notebook uses `system.ancestors_of` and the `_file` / `_partition` / `_spec_id` metadata columns, and its `.snapshots` / `.manifests` cells print a note instead of failing on 0.7.0; PyIceberg's `inspect.*` works |
 
 Expected noise: a `RESTMetricsReporter: Failed to report metrics` WARN in the
 container log after the CTAS + rename cell. Spark reports scan metrics for the
