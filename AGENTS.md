@@ -118,6 +118,8 @@ Then edit `.env`:
 | `ICEBERG_VERSION` | `iceberg-spark-runtime-4.1_2.13` / `iceberg-aws-bundle` version for `marimo-iceberg` (default `1.11.0`). |
 | `UC_ICEBERG_CATALOG` | UC catalog used as the Iceberg REST `warehouse` + Spark catalog name (default `unity`). |
 | `UC_SERVER_URL` / `UC_SERVER_PORT` / `UC_TOKEN` | Unity Catalog endpoint. Defaults talk to the bundled `unitycatalog` service. |
+| `UC_IMAGE` | Bundled UC server image (`uc=local`). Unset: `newfrontdocker/unitycatalog:v0.8.0-SNAPSHOT`, a moving pre-release tag (`just uc=local pull`). `.env.example` lists the digest-pinned official 0.7.0 to switch back to. |
+| `UNITY_CATALOG_VERSION` | `unitycatalog-spark` connector version for `marimo-spark` (unset: `0.6.0` from `common.py`). Point it at a `build/sbt publishLocal` build in `~/.ivy2/local` to test an unreleased connector. |
 | `UC_AUTHORIZATION` | `enable` / `disable` (default). Rendered into the bundled UC's `server.authorization` by `rustfs-init` (`uc=local`). Written by `just uc=local auth=... set-auth` / `demo-auth` / `demo-noauth`. |
 | `POSTGRES_*` | Local UC Postgres (`uc=local`). Keep in sync with `etc/conf/hibernate.properties`. |
 | `HOST_IVY_DIR` | Host Ivy repo bind-mounted into the container (default `~/.ivy2`). |
@@ -139,7 +141,7 @@ recipe accepts `uc=remote` (default) or `uc=local`.
 | Mode | What starts |
 | --- | --- |
 | `remote` (default) | `marimo-spark` + `marimo-iceberg`. Point them at an external UC via `.env`. |
-| `local` | Bundled `unitycatalog` (official `unitycatalog/unitycatalog:v0.7.0`, digest-pinned) + Postgres metadata DB + `rustfs` object store (+ `rustfs-init` bootstrap) **plus** both marimo services. |
+| `local` | Bundled `unitycatalog` (`UC_IMAGE`, default the `newfrontdocker/unitycatalog:v0.8.0-SNAPSHOT` pre-release) + Postgres metadata DB + `rustfs` object store (+ `rustfs-init` bootstrap) **plus** both marimo services. |
 
 Two notebook services run side by side:
 
@@ -164,6 +166,7 @@ just clean                 # down-volumes + delete the local marimo images
 just smoke-iceberg         # run notebooks/iceberg/ci-smoke-iceberg.py in marimo-iceberg (needs the stack up)
 just uc=local rotate-creds # re-mint the RustFS STS credential UC vends + restart UC (after ~12h)
 just uc=local rustfs-url   # print the RustFS console + S3 API URLs
+just uc=local pull         # pull the latest UC_IMAGE build (moving SNAPSHOT tag); then just uc=local up-detached
 just uc=local db-upgrade   # once, on a uc_postgres_data volume created by UC 0.6
 just uc=local demo-noauth  # build + start with auth disabled + print URLs
 just uc=local demo-auth    # build + start with auth enabled + seed demo users + print admin token/URLs
@@ -205,8 +208,8 @@ stack behaves like a cloud UC. On startup the one-shot `rustfs-init` service:
 3. renders `etc/conf` into the `uc_conf` volume, injecting the bucket/region and
    those creds into `server.properties`.
 
-Why STS: this UC build (`unitycatalog/unitycatalog:v0.7.0`) has **no
-custom S3 endpoint support** (that's the still-open unitycatalog PR #1636). Its credential
+Why STS: UC (the 0.7.0 release and the 0.8.0-SNAPSHOT build) has **no
+custom S3 endpoint support** (unitycatalog PR #1636 was closed unmerged). Its credential
 vendor returns static creds to Spark only when a **session token** is present,
 else it falls back to AWS STS (unreachable). RustFS — like MinIO — rejects a
 token it didn't issue, so `rustfs-init` mints a real RustFS STS token for UC to
@@ -351,12 +354,12 @@ UC_SERVER_URL=http://localhost:8080 S3_ENDPOINT_URL=http://localhost:9000 just e
 
 ```
 Justfile                         # task runner — start here
-docker-compose.yaml              # marimo-spark + marimo-iceberg + optional unitycatalog + postgres + rustfs (+init) (profile local-uc)
+docker-compose.yaml              # marimo-spark + marimo-iceberg + optional unitycatalog (UC_IMAGE) + postgres + rustfs (+init) (profile local-uc)
 Dockerfile                       # apache/spark 4.2 (digest-pinned) + requirements.lock (:2718)
 Dockerfile.iceberg               # apache/spark 4.1.3 (digest-pinned) + requirements-iceberg.lock (:2719)
 .github/workflows/local-stack.yml  # CI: check-lock, build both images, uc=local up, run both smoke notebooks
-.env.example                     # PYPI_PROXY_URL, MAVEN_PROXY_URL, SPARK/ICEBERG_VERSION, UC_*, POSTGRES_*, HOST_IVY_DIR, RUSTFS_*/S3_*
-etc/conf/server.properties       # bundled UC 0.7 server template (managed Delta + Iceberg; s3:// storage-root, @S3_*@ placeholders)
+.env.example                     # PYPI_PROXY_URL, MAVEN_PROXY_URL, SPARK/ICEBERG_VERSION, UNITY_CATALOG_VERSION, UC_* (incl. UC_IMAGE), POSTGRES_*, HOST_IVY_DIR, RUSTFS_*/S3_*
+etc/conf/server.properties       # bundled UC server template, 0.7 / 0.8-snapshot (managed Delta + Iceberg; s3:// storage-root, @S3_*@ placeholders)
 etc/conf/hibernate.properties    # local UC → Postgres JDBC (uc=local)
 etc/conf/*.log4j2.properties     # UC server/CLI logging (copied into the uc_conf volume by rustfs-init)
 etc/rustfs/bootstrap.sh          # rustfs-init: create bucket + mint STS creds + render server.properties (incl. UC_AUTHORIZATION)

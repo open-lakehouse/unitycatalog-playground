@@ -7,7 +7,7 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Unity Catalog Metric Views (new in UC 0.6.0)
+    # Unity Catalog Metric Views
     ---
     A **metric view** is a view-like object that defines reusable **dimensions**
     (grouping columns) and **measures** (named aggregations) over a source — a
@@ -16,18 +16,28 @@ def _(mo):
     aggregation logic lives in one governed place in Unity Catalog instead of
     being copy-pasted across queries.
 
-    This notebook walks through the full lifecycle against the bundled local UC:
+    This notebook walks through the full lifecycle against the bundled local UC
+    (`just uc=local start`):
 
     1. Bootstrap a brand-new `ecomm` catalog via the UC REST API.
     2. Build a catalog-managed Delta table `ecomm.consumer.orders` of fake
        e-commerce orders.
     3. Define a metric view `ecomm.consumer.orders_last_7_day_sales` with a
-       `region` dimension and a `last_7_day_sales` measure.
+       `region` dimension and three measures: `last_7_day_sales`,
+       `order_count`, and `avg_order_amount`.
     4. List, describe, and query it with `measure(...)`.
 
     > **Prerequisites.** Metric views need **Apache Spark 4.2+** (the
-    > `CREATE VIEW ... WITH METRICS` DDL landed in 4.2) and the **UC 0.6.0**
-    > Spark 4.2 connector (`io.unitycatalog:unitycatalog-spark_4.2_2.13:0.6.0`).
+    > `CREATE VIEW ... WITH METRICS` DDL landed in 4.2; Spark 4.0 and 4.1 don't
+    > have it) and a UC Spark 4.2 connector
+    > (`io.unitycatalog:unitycatalog-spark_4.2_2.13`) from **0.6.0** on. UC 0.5.0
+    > previewed the catalog side; 0.6.0 is the first release with full support.
+    > The next cell prints the connector version this session resolved
+    > (`UNITY_CATALOG_VERSION` in `.env`, default 0.6.0).
+    >
+    > **Server.** `uc=local` runs the `newfrontdocker/unitycatalog:v0.8.0-SNAPSHOT`
+    > pre-release build by default. Set `UC_IMAGE` in `.env` to run another
+    > build, such as the pinned 0.7.0 release.
     """)
     return
 
@@ -65,9 +75,12 @@ def _():
     FQ_TABLE = f"{CATALOG}.{SCHEMA}.{TABLE}"
     FQ_METRIC_VIEW = f"{CATALOG}.{SCHEMA}.{METRIC_VIEW}"
 
-    # Register a Spark catalog named `ecomm` bound to the same UC server.
-    # `UCSingleCatalog` maps the Spark-catalog name -> the UC catalog name, so the
-    # only extra we pass is the (correctly named) Delta REST API toggle for it.
+    # Register a Spark catalog named `ecomm` on the same UC server.
+    # `UCSingleCatalog` uses the Spark catalog name as the UC catalog name, so
+    # `ecomm.consumer.orders` names the same table in Spark SQL and in UC.
+    # `deltaRestApi.enabled` already defaults to true in the connector; setting
+    # it for `ecomm` only makes that explicit (common.spark_config() sets it for
+    # a catalog named `uc`, which doesn't apply here).
     spark: SparkSession = common.initialize(
         app_name="MetricViews",
         catalog=CATALOG,
@@ -101,7 +114,8 @@ def _():
 
 @app.cell
 def _(common):
-    # Sanity-check the versions + endpoint this session is wired to.
+    # Sanity-check the client versions and the UC endpoint this session is wired
+    # to (UNITY_CATALOG_VERSION and UC_SERVER_URL in .env change them).
     print("UC Spark connector:", f"unitycatalog-spark_{common.SPARK_VERSION}_2.13:{common.UNITY_CATALOG_VERSION}")
     print("Delta Lake:", common.DELTA_VERSION)
     print("UC server:", common.unity_catalog_server_url())
@@ -113,13 +127,15 @@ def _(mo):
     mo.md(r"""
     ## Bootstrap the `ecomm` catalog via the UC REST API
 
-    Unlike the other notebooks (which reuse the pre-created `unity` catalog), this
-    one creates its own `ecomm` catalog so the demo is self-contained. The cell
-    below `POST`s to the Unity Catalog catalogs API. It is **idempotent**: it
-    `GET`s the catalog first and only creates it when missing (treating a `409
-    ALREADY_EXISTS` as success), so re-running the notebook is safe.
+    The other notebooks share the `unity` catalog. This one creates its own
+    `ecomm` catalog so the demo is self-contained. The cell below `POST`s to the
+    Unity Catalog catalogs API. It is **idempotent**: it `GET`s the catalog first
+    and only creates it when missing (treating a `409 ALREADY_EXISTS` as
+    success), so re-running the notebook is safe. It sends `UC_TOKEN` as a
+    bearer token when one is set.
 
-    The equivalent curl call:
+    The equivalent curl call from the host (add
+    `-H "Authorization: Bearer $UC_TOKEN"` when authorization is enabled):
 
     ~~~bash
     curl -X POST "http://localhost:8080/api/2.1/unity-catalog/catalogs" \
@@ -199,8 +215,10 @@ def _(mo):
     ## Create the `consumer` schema
 
     With the catalog in place, create the `consumer` schema and pin the session
-    to `ecomm.consumer`. (`CREATE SCHEMA` needs `USE CATALOG` + `CREATE SCHEMA`
-    on `ecomm`; the bundled local UC runs without auth so this just works.)
+    to `ecomm.consumer`. `CREATE SCHEMA` needs `USE CATALOG` + `CREATE SCHEMA` on
+    `ecomm`. The bundled local UC runs with authorization disabled by default
+    (`UC_AUTHORIZATION=disable`), so this just works. With it enabled, the
+    session's `UC_TOKEN` needs those privileges (see `docs/uc/authentication.md`).
     """)
     return
 
@@ -225,7 +243,7 @@ def _(mo):
     mo.md(r"""
     ## Fake dataset: `ecomm.consumer.orders`
 
-    We generate ~500 fake orders. Each row carries:
+    We generate 500 fake orders. Each row carries:
 
     | column | type | notes |
     | --- | --- | --- |
@@ -234,7 +252,7 @@ def _(mo):
     | `product_id` | STRING | `SKU-####` |
     | `created_at` | TIMESTAMP | UTC, spread over the last ~21 days (biased recent) |
     | `status` | STRING | enum: PLACED / PAID / SHIPPED / DELIVERED / CANCELLED / RETURNED |
-    | `amount` | DOUBLE | order cost |
+    | `amount` | DOUBLE | order amount, 5.00–500.00 |
     | `quantity` | INT | units in the order |
     | `region` | STRING | ISO 3166-1 alpha-2 (US, GB, DE, ...) |
     | `currency` | STRING | ISO 4217, derived from region |
@@ -244,6 +262,10 @@ def _(mo):
     `created_at` is spread across the last few weeks (biased toward *recent*) so
     the `last_7_day_sales` metric view has a healthy mix of in-window and
     out-of-window rows to filter on.
+
+    The generator isn't seeded and dates are relative to *now*, so every run
+    produces different orders. Expect your counts and totals to differ from
+    run to run.
     """)
     return
 
@@ -377,9 +399,10 @@ def _(DataFrame, generate_orders, orders_to_dataframe, spark: "SparkSession"):
 
 @app.cell
 def _(FQ_TABLE, common, orders_df: "DataFrame"):
-    # `create_table_ddl` renders 99% of the DDL from the DataFrame schema. We add
-    # the catalog-managed feature flag + partition-by below in the explicit
-    # CREATE so re-runs are deterministic.
+    # Preview the DDL `common.create_table_ddl` derives from the DataFrame schema
+    # (columns + the catalog-managed table property). It can't express
+    # PARTITIONED BY, so the next cell writes the CREATE out by hand to
+    # partition by `region`.
     props = {"delta.feature.catalogManaged": "supported"}
     print(common.create_table_ddl(FQ_TABLE, orders_df.schema, props))
     return
@@ -387,7 +410,8 @@ def _(FQ_TABLE, common, orders_df: "DataFrame"):
 
 @app.cell
 def _(FQ_TABLE, spark: "SparkSession"):
-    # Catalog-managed Delta table, partitioned by the metric-view dimension.
+    # Catalog-managed Delta table, partitioned by the metric view's dimension.
+    # IF NOT EXISTS keeps re-runs safe.
     spark.sql(f"""
     CREATE TABLE IF NOT EXISTS {FQ_TABLE} (
       order_id STRING NOT NULL,
@@ -447,20 +471,27 @@ def _(mo):
     `CREATE VIEW ... WITH METRICS LANGUAGE YAML` defines the view. The YAML body
     (delimited by `$$ ... $$`) declares:
 
-    - `source` — the table/view (or SQL query) the metrics compute over.
+    - `version` — the metric-view YAML spec version. The upstream UC docs and
+      tests use `"0.1"`.
+    - `source` — the table/view (or SQL query) the metrics compute over. It must
+      already exist: `CREATE` resolves it when the view is created.
     - `filter` *(optional)* — a `WHERE`-like row filter. Here it scopes the view
       to the **trailing 7 days** via `current_timestamp() - INTERVAL 7 DAYS` and
       drops CANCELLED / RETURNED orders. Because it uses `current_timestamp()`,
       the window slides forward on every query.
-    - `dimensions` — grouping columns (`region`).
-    - `measures` — named aggregations read later via `measure(...)`.
+    - `dimensions` — the columns consumers can `GROUP BY` (`region`), each a
+      `name` plus an `expr`.
+    - `measures` — named aggregations (`sum(amount)`, `count(1)`,
+      `avg(amount)`) read later via `measure(...)`.
 
-    Metric views don't support `CREATE OR REPLACE VIEW`, so we `DROP VIEW IF
-    EXISTS` first to keep the cell idempotent.
+    Metric views don't support `CREATE OR REPLACE VIEW` (or `ALTER VIEW ...
+    RENAME TO`), so we `DROP VIEW IF EXISTS` first to keep the cell idempotent.
 
-    > **Note on YAML indentation:** the YAML string is intentionally written at
-    > column 0 (not indented to match the Python block) because the YAML body is
-    > whitespace-sensitive.
+    > **Note on YAML indentation:** in the marimo editor the YAML lines start at
+    > column 0. Keep them flush-left: the YAML body is whitespace-sensitive. (The
+    > `.py` file shows them indented one level because marimo stores each cell as
+    > a function body; it strips that indentation, strings included, when it
+    > runs the cell.)
     """)
     return
 
@@ -532,10 +563,13 @@ def _(mo):
 
     Read each measure through the `measure(...)` function and `GROUP BY` the
     dimension(s). Spark rewrites this into the aggregations defined in the YAML
-    (`sum(amount)`, `count(1)`, `avg(amount)`) over the filtered source.
+    (`sum(amount)`, `count(1)`, `avg(amount)`) over the filtered source, grouped
+    by the dimensions you select. Leave out `GROUP BY` for a grand total.
 
     > Selecting a measure column directly (e.g. `SELECT last_7_day_sales ...`) is
-    > **not** supported — it must go through `measure(...)`.
+    > **not** supported — it must go through `measure(...)`. On Spark 4.2.0 the
+    > direct select fails with an `[INTERNAL_ERROR]` planning error rather than
+    > a message that names the problem.
     """)
     return
 
@@ -561,12 +595,20 @@ def _(mo):
     mo.md(r"""
     ## Inspect from the UC CLI (optional)
 
-    The metric view is a governed UC object, so you can inspect it with the
-    bundled CLI in the running container:
+    The metric view is a governed UC object: UC stores it as a table with
+    `table_type` `METRIC_VIEW`, keeps the YAML body in `view_definition`, and
+    records its source table (`ecomm.consumer.orders`) in `view_dependencies`.
+    Inspect it with the CLI bundled in the `unitycatalog` container (`uc=local`):
 
     ~~~bash
     docker exec -it unitycatalog \
       bash bin/uc table get --full_name ecomm.consumer.orders_last_7_day_sales
+    ~~~
+
+    or through the REST API from the host:
+
+    ~~~bash
+    curl -s "http://localhost:8080/api/2.1/unity-catalog/tables/ecomm.consumer.orders_last_7_day_sales"
     ~~~
 
     ### Fallback: parquet external source
@@ -581,14 +623,20 @@ def _(mo):
     INSERT INTO ecomm.consumer.events VALUES ('US', 1), ('US', 2), ('EU', 3);
     ~~~
 
-    ...then point the metric view's `source` at `ecomm.consumer.events`.
+    ...then point the metric view's `source` at `ecomm.consumer.events`. Keep the
+    `LOCATION`: without it the table would be managed, and UC rejects it with
+    `Unity Catalog does not support non-Delta managed table`. `/tmp/uc_events_src`
+    is a path inside the `marimo-spark` container, so these files stay there, not
+    in RustFS.
     """)
     return
 
 
 @app.cell(disabled=True)
 def _(FQ_METRIC_VIEW, FQ_TABLE, spark: "SparkSession"):
-    # Enable this cell to tear the demo objects back down.
+    # Enable this cell to tear the demo objects back down. UC queues the dropped
+    # managed table's data for background cleanup (server.storage-cleanup.*);
+    # the `ecomm` catalog and `consumer` schema stay.
     spark.sql(f"DROP VIEW IF EXISTS {FQ_METRIC_VIEW}")
     spark.sql(f"DROP TABLE IF EXISTS {FQ_TABLE}")
     return

@@ -128,6 +128,13 @@ up: init net
 up-detached: init net
     {{s3_endpoint_env}} {{compose}} up -d
 
+# The bundled UC image (UC_IMAGE) defaults to a moving pre-release tag, and
+# compose never re-pulls an image it already has. Skips the locally built
+# marimo images. Follow with `just uc=local up-detached` to recreate UC on it.
+# Pull the latest images for the bundled UC stack (uc=local).
+pull: _require-local init
+    {{compose}} pull --ignore-buildable
+
 # Show running compose services.
 ps:
     {{compose}} ps

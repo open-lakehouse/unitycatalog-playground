@@ -62,7 +62,9 @@ DELTA_VERSION: str = os.environ.get("DELTA_VERSION", "4.4.0").strip()
 HADOOP_VERSION: str = os.environ.get("HADOOP_VERSION", "3.4.2").strip()
 MAVEN_PROXY_URL: str = os.environ.get("MAVEN_PROXY_URL", "").strip()
 SPARK_VERSION: str = _spark_version()
-UNITY_CATALOG_VERSION: str = os.environ.get("UNITY_CATALOG_VERSION", "0.6.0").strip()
+# Blank (e.g. `UNITY_CATALOG_VERSION=` in .env, passed through by compose) means
+# the default, not an empty Maven version.
+UNITY_CATALOG_VERSION: str = os.environ.get("UNITY_CATALOG_VERSION", "").strip() or "0.6.0"
 
 CATALOG: str = "unity"
 DEFAULT_APP_NAME: str = "DeltaCatalogManagedTables"

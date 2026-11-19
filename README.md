@@ -255,9 +255,15 @@ in this playground's config, 7 days upstream). It never deletes **external**
 table files.
 
 > [!NOTE]
-> `uc=local` runs the official
+> `uc=local` runs the
+> [`newfrontdocker/unitycatalog:v0.8.0-SNAPSHOT`](https://hub.docker.com/r/newfrontdocker/unitycatalog/tags?name=v0.8.0-SNAPSHOT)
+> pre-release build by default. It's a moving tag: `just uc=local pull` fetches
+> the latest build. Set `UC_IMAGE` in `.env` to run another build, such as the
+> official
 > [`unitycatalog/unitycatalog:v0.7.0`](https://hub.docker.com/r/unitycatalog/unitycatalog/tags?name=v0.7.0)
-> image, pinned by digest in `docker-compose.yaml`. If you are reusing a
+> release pinned by digest (the exact value is in `.env.example`). A newer
+> server upgrades an existing `uc_postgres_data` volume in place, so run
+> `just uc=local down-volumes` before comparing builds. If you are reusing a
 > Postgres volume created by UC 0.6, run `just uc=local db-upgrade` once.
 
 ## How the local stack works

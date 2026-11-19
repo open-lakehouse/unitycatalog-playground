@@ -1,7 +1,9 @@
 name: unitycatalog-playground
 
 # Version tags document the selected release; multi-architecture manifest
-# digests make every dependency immutable across Intel and ARM hosts.
+# digests make every dependency immutable across Intel and ARM hosts. The one
+# exception is the default Unity Catalog image, a moving pre-release tag (see
+# the unitycatalog service).
 services:
   # Bundled local Unity Catalog server. Gated behind the `local-uc` profile so a
   # plain `docker compose up` runs ONLY marimo-spark (talking to a remote/managed
@@ -18,13 +20,15 @@ services:
   # `rustfs-init` one-shot, which injects freshly-minted RustFS S3 credentials
   # into server.properties — hence the depends_on service_completed_successfully.
   #
-  # Official UC 0.7.0 image (native Iceberg tables via the Iceberg REST catalog),
-  # pinned to the multi-arch index digest so amd64 and arm64 hosts both pull a
-  # native, immutable build. The tag is informational; Docker resolves the digest.
+  # The server image is selectable with UC_IMAGE in .env. The default is the
+  # newfrontdocker UC 0.8.0-SNAPSHOT pre-release build (multi-arch). It's a
+  # moving tag, so it isn't digest-pinned, and compose never re-pulls an image
+  # it already has: `just uc=local pull` fetches the latest build. .env.example
+  # lists the official 0.7.0 release, pinned by digest, to switch back to.
   unitycatalog:
     profiles:
       - local-uc
-    image: unitycatalog/unitycatalog:v0.7.0@sha256:cdacdc5e7624795e7b2a18ece0d7357c5a1ec640db17fccb4d0fb208dd0d335b
+    image: ${UC_IMAGE:-newfrontdocker/unitycatalog:v0.8.0-SNAPSHOT}
     hostname: unitycatalog
     container_name: unitycatalog
     depends_on:
@@ -34,11 +38,12 @@ services:
         condition: service_completed_successfully
     environment:
       # Since 0.7 the server itself does S3 IO: it writes the first metadata.json
-      # of every native Iceberg table and deletes dropped managed data. UC has
-      # no custom-endpoint setting (unitycatalog PR #1636 was closed unmerged),
-      # so point the AWS SDK's service-specific endpoint at RustFS instead. The
-      # SDK addresses buckets virtual-hosted style (<bucket>.rustfs), which the
-      # `rustfs` service answers via RUSTFS_SERVER_DOMAINS + a network alias.
+      # of every native Iceberg table and deletes dropped managed data. UC (0.7
+      # and the 0.8 snapshot) has no custom-endpoint setting (unitycatalog PR
+      # #1636 was closed unmerged), so point the AWS SDK's service-specific
+      # endpoint at RustFS instead. The SDK addresses buckets virtual-hosted
+      # style (<bucket>.rustfs), which the `rustfs` service answers via
+      # RUSTFS_SERVER_DOMAINS + a network alias.
       AWS_ENDPOINT_URL_S3: http://rustfs:9000
     ports:
       - "8080:8080"
@@ -213,6 +218,10 @@ services:
       # `spark.jars.packages` (delta-spark / unitycatalog-spark coordinates). Must
       # be major.minor (e.g. 4.2); the notebook trims it and falls back to 4.2.
       - SPARK_VERSION=${SPARK_VERSION:-4.2}
+      # unitycatalog-spark connector version for the Delta / metric-view
+      # notebooks. Unset -> the default in notebooks/common.py. Set it in .env to
+      # try another build, e.g. a 0.8.0-SNAPSHOT published to ~/.ivy2/local.
+      - UNITY_CATALOG_VERSION
       # CPU / RAM for the local Spark session the notebooks build. They run Spark
       # in local[N] mode, so the whole job runs in ONE (driver) JVM:
       # SPARK_DRIVER_MEMORY is the real heap cap (spark.driver.memory / -Xmx) and
@@ -227,7 +236,7 @@ services:
         source: ./marimo-playground/notebooks
         target: /opt/workspace/marimo-playground/notebooks
       # Mount the host's local Ivy repository so Spark can resolve jars you
-      # published with `bin/sbt publishLocal` (these live in ~/.ivy2/local on the
+      # published with `build/sbt publishLocal` (these live in ~/.ivy2/local on the
       # host). Mounted read-write so Spark can also update its resolution cache.
       # Override the host path by setting HOST_IVY_DIR in .env (see .env.example).
       - type: bind
